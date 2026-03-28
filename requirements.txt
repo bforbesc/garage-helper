@@ -1,0 +1,11 @@
+anthropic>=0.52.0
+openai>=1.68.0
+flask>=3.0.0
+python-dotenv>=1.0.1
+pyautogui>=0.9.54
+mss>=10.0.0
+requests>=2.32.0
+numpy>=2.0.0
+sounddevice>=0.4.7
+soundfile>=0.13.1
+pytest>=8.3.0

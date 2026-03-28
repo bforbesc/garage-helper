@@ -1,0 +1,24 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local runtime artifacts
+downloads/
+screenshots/
+*.log
+
+# macOS
+.DS_Store
