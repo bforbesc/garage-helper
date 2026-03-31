@@ -1,43 +1,41 @@
 from __future__ import annotations
 
 import json
+import time
 from threading import Lock
 from typing import Any, Callable
 
-import anthropic
-try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover
-    OpenAI = None
+from openai import OpenAI
 
 from config import settings
-from tools import applescript, audio, computer_control, music_theory, samples
+from tools import applescript, audio, composer, computer_control, music_theory, samples
 
 SYSTEM_PROMPT = """You are GarageBand Copilot, an AI music production assistant operating GarageBand on macOS.
 Rules:
-- Prefer keyboard shortcuts before mouse clicks.
-- For editing notes/chords, first use music theory tools to get exact MIDI note numbers.
-- Use app-level operations through AppleScript; use computer actions for UI manipulation.
-- After any screen-modifying computer action, verify state using a screenshot.
-- When recommending samples, mention source and license when available.
-- Keep instructions concise and production-focused.
+- Act quickly: prefer `garageband_shortcut` or `computer_action` with `key_sequence` before click-heavy flows.
+- For "create melody/beat/song" requests, prefer `create_music_in_garageband` so the user gets an actual MIDI loaded fast.
+- Use music tools to create real musical output (melody/chords/bass/drums) and export MIDI when useful.
+- For note/chord precision, use music theory tools before UI entry.
+- After any screen-modifying computer action, verify with a screenshot path.
+- If the same action fails, do not retry more than once; ask user to refocus GarageBand.
+- Keep replies concise and execution-focused.
 """
 
 
 class GarageBandAgent:
     def __init__(self) -> None:
         self._lock = Lock()
-        self.provider = self._resolve_provider()
-        self.anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
-        self.openai_client = OpenAI(api_key=settings.openai_api_key) if (settings.openai_api_key and OpenAI) else None
-
-        self.anthropic_messages: list[dict[str, Any]] = []
-        self.openai_messages: list[dict[str, Any]] = []
+        self.provider = "openai"
+        self.openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        # Keep only plain text turns in memory; tool chatter remains per-request to avoid malformed histories.
+        self.text_history: list[dict[str, str]] = []
 
         self.tool_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "computer_action": self._tool_computer_action,
+            "garageband_shortcut": lambda i: computer_control.garageband_shortcut(i["name"]),
             "run_applescript": lambda i: applescript.run_applescript(i["script"]),
             "launch_garageband": lambda i: applescript.launch_garageband(),
+            "open_file_in_garageband": lambda i: applescript.open_file_in_garageband(i["path"]),
             "get_chord_progression": lambda i: music_theory.get_chord_progression(
                 i.get("key", "C"), i.get("progression", "I-V-vi-IV"), i.get("octave", 4)
             ),
@@ -46,6 +44,15 @@ class GarageBandAgent:
             "suggest_arrangement": lambda i: music_theory.suggest_arrangement(i.get("genre", "pop")),
             "get_tempo_suggestion": lambda i: music_theory.get_tempo_suggestion(i.get("genre", "pop")),
             "transpose_chord": lambda i: music_theory.transpose_chord(i["chord"], i["semitones"], i.get("octave", 4)),
+            "compose_music_idea": lambda i: composer.compose_music_idea(
+                genre=i.get("genre", "pop"),
+                key=i.get("key", "C"),
+                scale_type=i.get("scale_type"),
+                bars=i.get("bars", 4),
+                bpm=i.get("bpm"),
+                seed=i.get("seed"),
+            ),
+            "create_music_in_garageband": self._tool_create_music_in_garageband,
             "search_freesound": lambda i: samples.search_freesound(i["query"], i.get("page_size", 12)),
             "download_sample": lambda i: samples.download_file(i["url"], i.get("filename")),
             "preview_midi_notes": lambda i: audio.preview_midi_notes(i["midi_notes"], i.get("duration_sec", 1.2)),
@@ -55,17 +62,19 @@ class GarageBandAgent:
         self.tools = [
             {
                 "name": "computer_action",
-                "description": "Control the local computer UI: screenshot, click, type, key, scroll, drag.",
+                "description": "Control local UI: screenshot, click, type, key, key_sequence, scroll, drag.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["screenshot", "click", "type", "key", "scroll", "drag"]},
+                        "action": {"type": "string", "enum": ["screenshot", "click", "type", "key", "key_sequence", "scroll", "drag"]},
                         "x": {"type": "integer"},
                         "y": {"type": "integer"},
                         "button": {"type": "string"},
                         "clicks": {"type": "integer"},
                         "text": {"type": "string"},
                         "key": {"type": "string"},
+                        "keys": {"type": "array", "items": {"type": "string"}},
+                        "inter_key_delay_ms": {"type": "integer"},
                         "amount": {"type": "integer"},
                         "duration": {"type": "number"},
                     },
@@ -73,211 +82,191 @@ class GarageBandAgent:
                 },
             },
             {
-                "name": "run_applescript",
-                "description": "Run an AppleScript snippet.",
-                "input_schema": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]},
+                "name": "garageband_shortcut",
+                "description": "Run named GarageBand shortcut quickly. Names: play_pause, new_track_dialog, open_editor, toggle_library, toggle_smart_controls, toggle_cycle, toggle_metronome, undo, redo, duplicate_region, split_at_playhead, save_project.",
+                "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
             },
+            {"name": "run_applescript", "description": "Run AppleScript snippet.", "input_schema": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}},
+            {"name": "launch_garageband", "description": "Launch and activate GarageBand app.", "input_schema": {"type": "object", "properties": {}}},
+            {"name": "open_file_in_garageband", "description": "Open local file (for example MIDI) in GarageBand.", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+            {"name": "get_chord_progression", "description": "Get progression with MIDI notes.", "input_schema": {"type": "object", "properties": {"key": {"type": "string"}, "progression": {"type": "string"}, "octave": {"type": "integer"}}}},
+            {"name": "get_midi_notes_for_chord", "description": "Get exact MIDI notes for chord.", "input_schema": {"type": "object", "properties": {"chord": {"type": "string"}, "octave": {"type": "integer"}}, "required": ["chord"]}},
+            {"name": "get_scale_notes", "description": "Get scale note names and MIDI.", "input_schema": {"type": "object", "properties": {"root": {"type": "string"}, "scale_type": {"type": "string"}, "octave": {"type": "integer"}}, "required": ["root"]}},
+            {"name": "suggest_arrangement", "description": "Suggest arrangement sections.", "input_schema": {"type": "object", "properties": {"genre": {"type": "string"}}}},
+            {"name": "get_tempo_suggestion", "description": "Suggest BPM/time signature.", "input_schema": {"type": "object", "properties": {"genre": {"type": "string"}}}},
+            {"name": "transpose_chord", "description": "Transpose chord and return MIDI notes.", "input_schema": {"type": "object", "properties": {"chord": {"type": "string"}, "semitones": {"type": "integer"}, "octave": {"type": "integer"}}, "required": ["chord", "semitones"]}},
             {
-                "name": "launch_garageband",
-                "description": "Launch and activate GarageBand app.",
-                "input_schema": {"type": "object", "properties": {}},
-            },
-            {
-                "name": "get_chord_progression",
-                "description": "Get a progression in a key with MIDI note numbers.",
+                "name": "compose_music_idea",
+                "description": "Create melody/chords/bass/drums and export a MIDI file. Returns MIDI path and note events.",
                 "input_schema": {
                     "type": "object",
-                    "properties": {"key": {"type": "string"}, "progression": {"type": "string"}, "octave": {"type": "integer"}},
+                    "properties": {
+                        "genre": {"type": "string"},
+                        "key": {"type": "string"},
+                        "scale_type": {"type": "string"},
+                        "bars": {"type": "integer"},
+                        "bpm": {"type": "integer"},
+                        "seed": {"type": "integer"},
+                    },
                 },
             },
             {
-                "name": "get_midi_notes_for_chord",
-                "description": "Get exact MIDI notes for a chord.",
+                "name": "create_music_in_garageband",
+                "description": "Fast path: compose melody/bass/drums MIDI and open it in GarageBand in one call.",
                 "input_schema": {
                     "type": "object",
-                    "properties": {"chord": {"type": "string"}, "octave": {"type": "integer"}},
-                    "required": ["chord"],
+                    "properties": {
+                        "genre": {"type": "string"},
+                        "key": {"type": "string"},
+                        "scale_type": {"type": "string"},
+                        "bars": {"type": "integer"},
+                        "bpm": {"type": "integer"},
+                        "seed": {"type": "integer"},
+                        "open_in_garageband": {"type": "boolean"},
+                    },
                 },
             },
-            {
-                "name": "get_scale_notes",
-                "description": "Get scale note names and MIDI values.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"root": {"type": "string"}, "scale_type": {"type": "string"}, "octave": {"type": "integer"}},
-                    "required": ["root"],
-                },
-            },
-            {
-                "name": "suggest_arrangement",
-                "description": "Suggest genre-aware arrangement sections.",
-                "input_schema": {"type": "object", "properties": {"genre": {"type": "string"}}},
-            },
-            {
-                "name": "get_tempo_suggestion",
-                "description": "Suggest BPM and time signature by genre.",
-                "input_schema": {"type": "object", "properties": {"genre": {"type": "string"}}},
-            },
-            {
-                "name": "transpose_chord",
-                "description": "Transpose a chord and return MIDI note numbers.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"chord": {"type": "string"}, "semitones": {"type": "integer"}, "octave": {"type": "integer"}},
-                    "required": ["chord", "semitones"],
-                },
-            },
-            {
-                "name": "search_freesound",
-                "description": "Search Freesound for samples.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}, "page_size": {"type": "integer"}},
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "download_sample",
-                "description": "Download a sample file from URL.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"url": {"type": "string"}, "filename": {"type": "string"}},
-                    "required": ["url"],
-                },
-            },
-            {
-                "name": "preview_midi_notes",
-                "description": "Synthesize and play MIDI notes through speakers.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"midi_notes": {"type": "array", "items": {"type": "integer"}}, "duration_sec": {"type": "number"}},
-                    "required": ["midi_notes"],
-                },
-            },
-            {
-                "name": "play_audio_file",
-                "description": "Play an audio file through speakers.",
-                "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-            },
+            {"name": "search_freesound", "description": "Search Freesound samples.", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}, "page_size": {"type": "integer"}}, "required": ["query"]}},
+            {"name": "download_sample", "description": "Download sample from URL.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}, "filename": {"type": "string"}}, "required": ["url"]}},
+            {"name": "preview_midi_notes", "description": "Synthesize/play MIDI notes.", "input_schema": {"type": "object", "properties": {"midi_notes": {"type": "array", "items": {"type": "integer"}}, "duration_sec": {"type": "number"}}, "required": ["midi_notes"]}},
+            {"name": "play_audio_file", "description": "Play local audio file.", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
         ]
 
     def reset(self) -> None:
         with self._lock:
-            self.anthropic_messages = []
-            self.openai_messages = []
+            self.text_history = []
 
     def handle_user_message(self, text: str) -> dict[str, Any]:
         with self._lock:
             if not text.strip():
                 return {"text": "Please enter a message.", "tool_events": []}
-            if self.provider == "anthropic":
-                return self._handle_with_anthropic(text)
-            if self.provider == "openai":
-                return self._handle_with_openai(text)
-            return {
-                "text": "No model key configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY.",
-                "tool_events": [],
-            }
-
-    def _handle_with_anthropic(self, text: str) -> dict[str, Any]:
-        if not self.anthropic_client:
-            return {"text": "ANTHROPIC_API_KEY missing.", "tool_events": []}
-
-        self.anthropic_messages.append({"role": "user", "content": text})
-        tool_events: list[dict[str, Any]] = []
-        for _ in range(8):
-            response = self.anthropic_client.messages.create(
-                model=settings.anthropic_model,
-                system=SYSTEM_PROMPT,
-                messages=self.anthropic_messages,
-                tools=self.tools,
-                max_tokens=settings.anthropic_max_tokens,
-            )
-            assistant_blocks = [self._block_to_dict(block) for block in response.content]
-            self.anthropic_messages.append({"role": "assistant", "content": assistant_blocks})
-
-            tool_uses = [b for b in assistant_blocks if b.get("type") == "tool_use"]
-            if not tool_uses:
-                final_text = "".join([b.get("text", "") for b in assistant_blocks if b.get("type") == "text"]).strip()
-                self.openai_messages.extend(
-                    [
-                        {"role": "user", "content": text},
-                        {"role": "assistant", "content": final_text or "(No text response)"},
-                    ]
-                )
-                return {"text": final_text or "(No text response)", "tool_events": tool_events}
-
-            results_for_model = []
-            for tool_use in tool_uses:
-                name = tool_use["name"]
-                tool_input = tool_use.get("input", {})
-                result = self._safe_tool_execute(name, tool_input)
-                tool_events.append({"tool": name, "input": tool_input, "result": result})
-                results_for_model.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use["id"],
-                        "content": json.dumps(result),
-                    }
-                )
-
-            self.anthropic_messages.append({"role": "user", "content": results_for_model})
-
-        return {"text": "Stopped after too many tool iterations.", "tool_events": tool_events}
+            return self._handle_with_openai(text)
 
     def _handle_with_openai(self, text: str) -> dict[str, Any]:
-        if OpenAI is None:
-            return {"text": "OpenAI SDK is not installed. Run: pip install -r requirements.txt", "tool_events": []}
         if not self.openai_client:
             return {"text": "OPENAI_API_KEY missing.", "tool_events": []}
 
-        self.openai_messages.append({"role": "user", "content": text})
+        deadline = time.monotonic() + settings.llm_total_timeout_sec
         tool_events: list[dict[str, Any]] = []
-        for _ in range(8):
-            response = self.openai_client.chat.completions.create(
-                model=settings.openai_model,
-                messages=[{"role": "system", "content": SYSTEM_PROMPT}] + self.openai_messages,
-                tools=self._openai_tools(),
-                tool_choice="auto",
-            )
-            msg = response.choices[0].message
-            assistant_content = msg.content or ""
+        failure_streak = 0
+        retry_after_trim = False
+        retry_after_empty = False
+        working_messages = self._build_working_messages(text)
+        last_tool_signature = ""
+        repeated_tool_calls = 0
 
-            assistant_message: dict[str, Any] = {"role": "assistant", "content": assistant_content}
-            if msg.tool_calls:
-                assistant_message["tool_calls"] = [
+        for _ in range(8):
+            if time.monotonic() > deadline:
+                return {"text": "Timed out waiting for model response. Please try again.", "tool_events": tool_events}
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + working_messages,
+                    tools=self._openai_tools(),
+                    tool_choice="auto",
+                    timeout=settings.llm_request_timeout_sec,
+                    max_completion_tokens=settings.openai_max_output_tokens,
+                    reasoning_effort=settings.openai_reasoning_effort,
+                    verbosity=settings.openai_verbosity,
+                    parallel_tool_calls=False,
+                )
+            except Exception as exc:
+                msg = str(exc)
+                if ("Request too large" in msg or "tokens per min" in msg or "rate_limit_exceeded" in msg) and not retry_after_trim:
+                    retry_after_trim = True
+                    self._trim_history_aggressively()
+                    working_messages = self._build_working_messages(text)
+                    continue
+                return {"text": f"Model call failed: {exc}", "tool_events": tool_events}
+
+            assistant_msg = response.choices[0].message
+            finish_reason = response.choices[0].finish_reason
+            assistant_content = (assistant_msg.content or "").strip()
+
+            assistant_entry: dict[str, Any] = {"role": "assistant", "content": assistant_content}
+            if assistant_msg.tool_calls:
+                assistant_entry["tool_calls"] = [
                     {
                         "id": tc.id,
                         "type": "function",
                         "function": {"name": tc.function.name, "arguments": tc.function.arguments},
                     }
-                    for tc in msg.tool_calls
+                    for tc in assistant_msg.tool_calls
                 ]
-            self.openai_messages.append(assistant_message)
+            working_messages.append(assistant_entry)
 
-            if not msg.tool_calls:
-                self.anthropic_messages.extend(
-                    [
-                        {"role": "user", "content": text},
-                        {"role": "assistant", "content": [{"type": "text", "text": assistant_content or "(No text response)"}]},
-                    ]
-                )
-                return {"text": assistant_content or "(No text response)", "tool_events": tool_events}
+            if not assistant_msg.tool_calls:
+                if not assistant_content and finish_reason == "length" and not retry_after_empty:
+                    retry_after_empty = True
+                    working_messages.append(
+                        {
+                            "role": "user",
+                            "content": "Answer directly in <=120 tokens. If needed, call one tool, then respond with a concise result.",
+                        }
+                    )
+                    continue
+                final_text = assistant_content or "No response text was generated. Please try again with a shorter request."
+                self._append_text_turn("user", text)
+                self._append_text_turn("assistant", final_text)
+                return {"text": final_text, "tool_events": tool_events}
 
-            for tc in msg.tool_calls:
+            for tc in assistant_msg.tool_calls:
                 name = tc.function.name
-                tool_input = json.loads(tc.function.arguments or "{}")
+                try:
+                    tool_input = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    tool_input = {}
+                tool_signature = f"{name}:{json.dumps(tool_input, sort_keys=True)}"
+                if tool_signature == last_tool_signature:
+                    repeated_tool_calls += 1
+                else:
+                    repeated_tool_calls = 1
+                    last_tool_signature = tool_signature
+                if repeated_tool_calls >= 3:
+                    return {
+                        "text": "Stopped after repeated identical tool calls. Please refocus GarageBand and retry.",
+                        "tool_events": tool_events,
+                    }
                 result = self._safe_tool_execute(name, tool_input)
                 tool_events.append({"tool": name, "input": tool_input, "result": result})
-                self.openai_messages.append(
+
+                if result.get("ok") is False:
+                    failure_streak += 1
+                else:
+                    failure_streak = 0
+                if failure_streak >= 3:
+                    return {
+                        "text": "Stopped after repeated tool failures. Please confirm GarageBand is focused and computer control is enabled.",
+                        "tool_events": tool_events,
+                    }
+
+                working_messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": json.dumps(result),
+                        "content": json.dumps(self._compact_result_for_model(result)),
                     }
                 )
 
         return {"text": "Stopped after too many tool iterations.", "tool_events": tool_events}
+
+    def _build_working_messages(self, user_text: str) -> list[dict[str, Any]]:
+        turns = settings.history_max_turns * 2
+        history_tail = self.text_history[-turns:]
+        msgs: list[dict[str, Any]] = [{"role": item["role"], "content": item["content"]} for item in history_tail]
+        msgs.append({"role": "user", "content": user_text})
+        return msgs
+
+    def _append_text_turn(self, role: str, content: str) -> None:
+        self.text_history.append({"role": role, "content": content})
+        turns = settings.history_max_turns * 2
+        if len(self.text_history) > turns:
+            self.text_history = self.text_history[-turns:]
+
+    def _trim_history_aggressively(self) -> None:
+        # Used only on request-too-large errors.
+        keep_turns = max(2, settings.history_max_turns // 2) * 2
+        self.text_history = self.text_history[-keep_turns:]
 
     def _safe_tool_execute(self, name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -293,7 +282,8 @@ class GarageBandAgent:
     def _tool_computer_action(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         action = tool_input.get("action")
         if action == "screenshot":
-            return computer_control.screenshot()
+            shot = computer_control.screenshot()
+            return {"ok": True, "path": shot.get("path", "")}
         if action == "click":
             result = computer_control.click(
                 x=int(tool_input["x"]),
@@ -301,19 +291,26 @@ class GarageBandAgent:
                 button=tool_input.get("button", "left"),
                 clicks=int(tool_input.get("clicks", 1)),
             )
-            result["post_action_screenshot"] = computer_control.screenshot()["path"]
+            result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "type":
             result = computer_control.type_text(tool_input["text"])
-            result["post_action_screenshot"] = computer_control.screenshot()["path"]
+            result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "key":
             result = computer_control.key_press(tool_input["key"])
-            result["post_action_screenshot"] = computer_control.screenshot()["path"]
+            result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
+            return result
+        if action == "key_sequence":
+            result = computer_control.key_sequence(
+                keys=tool_input.get("keys", []),
+                inter_key_delay_ms=int(tool_input.get("inter_key_delay_ms", 70)),
+            )
+            result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "scroll":
             result = computer_control.scroll(int(tool_input.get("amount", -400)))
-            result["post_action_screenshot"] = computer_control.screenshot()["path"]
+            result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "drag":
             result = computer_control.drag(
@@ -321,9 +318,32 @@ class GarageBandAgent:
                 y=int(tool_input["y"]),
                 duration=float(tool_input.get("duration", 0.2)),
             )
-            result["post_action_screenshot"] = computer_control.screenshot()["path"]
+            result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         raise ValueError(f"Unsupported action: {action}")
+
+    def _tool_create_music_in_garageband(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        composition = composer.compose_music_idea(
+            genre=tool_input.get("genre", "pop"),
+            key=tool_input.get("key", "C"),
+            scale_type=tool_input.get("scale_type"),
+            bars=tool_input.get("bars", 4),
+            bpm=tool_input.get("bpm"),
+            seed=tool_input.get("seed"),
+        )
+        if not composition.get("ok"):
+            return composition
+        open_requested = bool(tool_input.get("open_in_garageband", True))
+        launch_result = applescript.launch_garageband() if open_requested else {"ok": True, "skipped": True}
+        open_result = (
+            applescript.open_file_in_garageband(composition["midi_file_path"]) if open_requested else {"ok": True, "skipped": True}
+        )
+        return {
+            "ok": bool(composition.get("ok")) and bool(launch_result.get("ok")) and bool(open_result.get("ok")),
+            "composition": composition,
+            "launch_result": launch_result,
+            "open_result": open_result,
+        }
 
     def _openai_tools(self) -> list[dict[str, Any]]:
         return [
@@ -338,19 +358,16 @@ class GarageBandAgent:
             for tool in self.tools
         ]
 
-    @staticmethod
-    def _block_to_dict(block: Any) -> dict[str, Any]:
-        if hasattr(block, "model_dump"):
-            return block.model_dump()
-        return dict(block)
-
-    @staticmethod
-    def _resolve_provider() -> str:
-        requested = settings.llm_provider.strip().lower()
-        if requested in {"anthropic", "openai"}:
-            return requested
-        if settings.openai_api_key and OpenAI is not None:
-            return "openai"
-        if settings.anthropic_api_key:
-            return "anthropic"
-        return "none"
+    def _compact_result_for_model(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            compact: dict[str, Any] = {}
+            for k, v in data.items():
+                if k.lower() in {"base64_png", "image_base64", "screenshot_base64"}:
+                    continue
+                compact[k] = self._compact_result_for_model(v)
+            return compact
+        if isinstance(data, list):
+            return [self._compact_result_for_model(v) for v in data[:120]]
+        if isinstance(data, str):
+            return data if len(data) <= 1400 else data[:1400] + "...(truncated)"
+        return data

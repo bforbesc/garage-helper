@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import math
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-
-from config import settings
 
 
 def midi_to_freq(midi_note: int) -> float:
@@ -37,14 +34,3 @@ def play_audio_file(path: str) -> dict:
     sd.play(data, sample_rate)
     sd.wait()
     return {"ok": True, "path": str(Path(path).resolve())}
-
-
-def speak(text: str) -> dict:
-    if not text.strip():
-        return {"ok": True, "skipped": True}
-    proc = subprocess.run(
-        ["say", "-v", settings.say_voice, text[:500]],
-        capture_output=True,
-        text=True,
-    )
-    return {"ok": proc.returncode == 0, "stderr": proc.stderr.strip()}

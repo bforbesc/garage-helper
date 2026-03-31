@@ -1,63 +1,61 @@
-# GarageBand AI Agent
+# CLAUDE.md
 
-## Project Overview
-A Python-based AI agent with a visual UI that helps produce music in GarageBand on macOS. The agent sits in a window next to GarageBand and combines:
-1. **Direct GarageBand control** via Claude's computer use API (screenshots, clicks, keypresses)
-2. **Music theory assistance** via custom tools (chord progressions, scales, MIDI note numbers, arrangements)
-3. **Voice interaction** — speech-to-text input + text-to-speech output so the user can talk to the agent hands-free
-4. **Web access** — browse sample sites (freesound.org, looperman.com, splice.com, YouTube) to find and download samples
-5. **Audio preview** — the agent can play back sounds (both its own synthesized previews of MIDI notes/chords AND samples from the web) so the user can hear ideas before committing them in GarageBand
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Tech Stack
-- **Language**: Python
-- **AI**: Anthropic SDK, Claude `claude-opus-4-6` with `computer-use-2025-01-24` beta
-- **UI**: TBD (web app via Flask/React or Gradio recommended — needs to run alongside GarageBand)
-- **Computer control**: `pyautogui` for executing clicks/keys, `mss` for screenshots
-- **Audio**: Needs a library for MIDI synthesis/playback (e.g., `pygame.midi`, `fluidsynth`, or `sounddevice`)
-- **Voice**: Speech-to-text (e.g., `whisper` or macOS dictation) + TTS (e.g., macOS `say` command or `pyttsx3`)
-- **Web**: `requests` or browser automation for sample sites; freesound.org has an API
+## What This Is
+
+GarageBand AI Agent — a Python/Flask app that acts as an AI music production assistant for GarageBand on macOS. It uses OpenAI tool-calling to control GarageBand via screenshots/clicks/keys, generate MIDI compositions, search/download samples from Freesound, and preview audio. Voice input via browser Web Speech API.
+
+## Commands
+
+```bash
+# Setup
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # then set OPENAI_API_KEY and FREESOUND_API_KEY
+
+# Run (serves on http://127.0.0.1:5050)
+python app.py
+
+# Tests
+pytest -q                          # all tests
+pytest tests/test_music_theory.py  # single file
+pytest -k test_health_endpoint     # single test by name
+```
 
 ## Architecture
 
-### Agent Loop (`agent.py`)
-- Maintains in-memory message history for the session
-- Calls `client.beta.messages.create()` with computer use beta
-- Dispatches tool calls: computer use, music theory, AppleScript, web search, audio playback
-- Auto-injects screenshot after screen-modifying actions so Claude never acts on stale UI state
-- Configurable delays for GarageBand UI animation settling
+**Request flow:** Browser UI → `POST /api/chat` → `app.py` → `agent.handle_user_message()` → OpenAI Chat Completions with tools → tool dispatch loop (up to 8 iterations) → response with text + tool_events.
 
-### Tools
-1. **Computer use** (`computer_20250124`) — screenshot, click, type, key, scroll, drag
-2. **AppleScript** (`run_applescript`) — launch/activate GarageBand, open projects, trigger menu items (GarageBand's AppleScript support is minimal — use computer use for MIDI/track editing)
-3. **Music theory** (custom tools):
-   - `get_chord_progression` — returns chords with MIDI note numbers
-   - `get_midi_notes_for_chord` — chord name → exact MIDI numbers
-   - `get_scale_notes` — scale → note names + MIDI numbers
-   - `suggest_arrangement` — genre-aware song structure
-   - `get_tempo_suggestion` — genre → BPM + time signature
-   - `transpose_chord` — transpose with MIDI output
-4. **Web/samples** — search and download from sample sites
-5. **Audio playback** — synthesize and play MIDI notes or downloaded samples through speakers
+**Agent loop** (`agent.py`): `GarageBandAgent` maintains `text_history` (plain text turns only, capped at `HISTORY_MAX_TURNS`). Tool calls and results stay per-request in `working_messages` to avoid malformed histories. The loop has safeguards: 3-failure streak abort, 3-identical-tool-call abort, deadline timeout, and automatic history trimming on token limit errors.
 
-### UI
-A visual interface (web app or native) running alongside GarageBand with:
-- Chat history display
-- Microphone button for voice input (speech-to-text)
-- TTS for agent responses (reads replies aloud)
-- Audio player for previewing samples and MIDI ideas
-- Text input as fallback
+**Tool dispatch** is a flat `tool_handlers` dict mapping tool names to callables. Tool definitions use `input_schema` format (converted to OpenAI function format in `_openai_tools()`). After any screen-modifying computer action, a screenshot is auto-injected into the result.
 
-### System Prompt
-Instructs Claude to: always screenshot before acting, prefer keyboard shortcuts, use music theory tools for precise MIDI data before drawing in piano roll, verify each action with screenshots, use AppleScript only for app-level operations.
+**Tools** live in `tools/` as plain modules (no classes):
+- `computer_control.py` — pyautogui + mss; all actions gated by `ENABLE_COMPUTER_CONTROL` env var via `ensure_enabled()`
+- `applescript.py` — osascript subprocess; gated by `ALLOW_APPLESCRIPT`
+- `music_theory.py` — pure functions for chords/scales/progressions/tempo, returns exact MIDI note numbers (0-127)
+- `composer.py` — generates melody/chords/bass/drums using music_theory + random, exports MIDI via `mido`
+- `samples.py` — Freesound API search + download with host allowlist and size cap
+- `audio.py` — sine wave MIDI preview via numpy/sounddevice, file playback via soundfile
 
-## Key Design Decisions
-- Music theory as structured tools (not just prompting) to get exact MIDI note numbers (0-127) and avoid hallucination
-- GarageBand has very limited AppleScript — primary control is via computer use
-- Flat file structure, no over-engineering
-- Audio preview is critical so user can hear ideas before the agent commits them in GarageBand
+**Config** (`config.py`): single frozen `Settings` dataclass reading all values from env vars via `python-dotenv`. Imported as `settings` singleton.
 
-## Open Questions
-- Which UI framework to use (web app vs native desktop)
-- Which specific sample websites to integrate (user hasn't confirmed yet)
-- Voice input approach (local Whisper vs macOS dictation vs browser Web Speech API)
-- Audio synthesis library for MIDI preview playback
+## Key Patterns
+
+- All tool functions return `dict` with `"ok": True/False` pattern
+- `computer_control` actions require `ENABLE_COMPUTER_CONTROL=true` (default is `false`)
+- Music theory tools are structured (not LLM-prompted) to avoid MIDI note hallucination
+- GarageBand has minimal AppleScript support — UI automation via pyautogui is the primary control method
+- The `create_music_in_garageband` tool is a composition of `compose_music_idea` + `launch_garageband` + `open_file_in_garageband`
+- Screenshots and downloads go to `screenshots/` and `downloads/` dirs respectively
+- Flask app disables caching and uses file mtime for asset versioning
+
+## Environment Variables
+
+Required: `OPENAI_API_KEY`, `FREESOUND_API_KEY`
+
+See `.env.example` for all options. Key toggles:
+- `ENABLE_COMPUTER_CONTROL` (default `false`) — must be `true` for click/type/key actions
+- `ALLOW_APPLESCRIPT` (default `true`)
+- `AUTO_OPEN_GARAGEBAND` (default `true`) — launches GarageBand on `python app.py`

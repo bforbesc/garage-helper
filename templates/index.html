@@ -4,45 +4,26 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GarageBand AI Agent</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}" />
   </head>
   <body>
     <main class="layout">
       <section class="panel">
         <h1>GarageBand AI Agent</h1>
-        <p class="sub">Hands-free production assistant with tools, voice, and preview audio.</p>
-        <p id="runtimeMeta" class="sub"></p>
+        <p class="sub">How can I help with your song today?</p>
         <div id="chat" class="chat"></div>
+        <p id="status" class="status"></p>
         <div class="row">
-          <input id="messageInput" type="text" placeholder="Ask for chords, arrangement, or GarageBand actions..." />
+          <input id="messageInput" type="text" placeholder="Message GarageBand AI Agent..." />
           <button id="sendBtn">Send</button>
         </div>
-        <div class="row">
+        <div class="row controls">
           <button id="micBtn">Start Mic</button>
           <button id="resetBtn" class="secondary">Reset Chat</button>
-          <label class="toggle">
-            <input id="ttsToggle" type="checkbox" checked />
-            Speak replies
-          </label>
         </div>
-      </section>
-
-      <section class="panel side">
-        <h2>Quick Audio Preview</h2>
-        <div class="row">
-          <input id="chordInput" type="text" value="Cm7" />
-          <button id="previewChordBtn">Preview Chord</button>
-        </div>
-        <h2>Sample Search (Freesound)</h2>
-        <div class="row">
-          <input id="sampleQueryInput" type="text" placeholder="vinyl crackle, kick, pad..." />
-          <button id="sampleSearchBtn">Search</button>
-        </div>
-        <div id="samples" class="samples"></div>
-        <p id="status" class="status"></p>
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="{{ url_for('static', filename='app.js', v=asset_version) }}"></script>
   </body>
 </html>

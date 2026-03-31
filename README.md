@@ -1,12 +1,13 @@
 # GarageBand AI Agent
 
 Python + Flask assistant for music production in GarageBand with:
-- Anthropic chat + tool calling
-- OpenAI chat + tool calling (optional provider)
+- OpenAI chat + tool calling
 - Computer control (screenshot/click/type/key/scroll/drag)
+- Fast keyboard automation (`garageband_shortcut` and `key_sequence`)
 - Music theory tools with exact MIDI note output
+- Composition tool that generates melody/chords/bass/drums and exports MIDI (`compose_music_idea`)
+- One-step compose+import flow (`create_music_in_garageband`) for fast GarageBand results
 - Voice input via browser speech recognition
-- TTS via macOS `say`
 - Freesound sample search/download
 - Audio preview (synthesized MIDI notes + local sample playback)
 
@@ -29,11 +30,18 @@ Set at minimum:
 - `FREESOUND_API_KEY` (for sample search/download)
 
 Optional:
-- `LLM_PROVIDER=openai|anthropic|auto` (default is `openai`)
+- `LLM_PROVIDER=openai` (default is `openai`)
+- `LLM_REQUEST_TIMEOUT_SEC` timeout per model API call (default `25`)
+- `LLM_TOTAL_TIMEOUT_SEC` max total agent turn time (default `55`)
+- `OPENAI_REASONING_EFFORT` (`low|medium|high`, default `low`)
+- `OPENAI_VERBOSITY` (`low|medium|high`, default `low`)
+- `OPENAI_MAX_OUTPUT_TOKENS` model output cap per call (default `900`)
+- `HISTORY_MAX_TURNS` retained text turns for context (default `10`)
 - `ENABLE_COMPUTER_CONTROL=true` to allow click/type/key/screenshot actions
 - `ALLOW_APPLESCRIPT=true|false`
 - `ALLOWED_DOWNLOAD_HOSTS` comma-separated host allowlist
 - `MAX_DOWNLOAD_MB` max per-file download size
+- `AUTO_OPEN_GARAGEBAND=true|false` (default `true`)
 
 ## Run
 ```bash
@@ -45,6 +53,7 @@ Open [http://127.0.0.1:5050](http://127.0.0.1:5050).
 One-click launcher:
 - Double-click [launch_garage_ai.command](/Users/bernardo/Desktop/CODE/garage-ai/launch_garage_ai.command)
 - It creates `.venv` (if missing), installs deps once, ensures `.env` exists, opens browser, and starts the app
+- It auto-reinstalls deps when `requirements.txt` changes
 
 Desktop shortcut/icon (macOS):
 ```bash
@@ -59,8 +68,9 @@ pytest -q
 
 ## Core Files
 - `app.py`: Flask API + UI server
-- `agent.py`: Anthropic loop + tool dispatch
+- `agent.py`: OpenAI loop + tool dispatch
 - `tools/music_theory.py`: MIDI-aware chord/scale/arrangement tools
+- `tools/composer.py`: melody/bass/drums generator + MIDI export
 - `tools/computer_control.py`: screenshot and UI controls
 - `tools/applescript.py`: app-level automation via `osascript`
 - `tools/samples.py`: Freesound search/download
