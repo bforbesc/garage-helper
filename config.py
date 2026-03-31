@@ -27,6 +27,7 @@ class Settings:
     freesound_api_key: str = os.getenv("FREESOUND_API_KEY", "")
     post_action_delay_ms: int = int(os.getenv("POST_ACTION_DELAY_MS", "400"))
     enable_computer_control: bool = os.getenv("ENABLE_COMPUTER_CONTROL", "false").lower() in {"1", "true", "yes"}
+    auto_focus_garageband: bool = os.getenv("AUTO_FOCUS_GARAGEBAND", "true").lower() in {"1", "true", "yes"}
     allow_applescript: bool = os.getenv("ALLOW_APPLESCRIPT", "true").lower() in {"1", "true", "yes"}
     allowed_download_hosts: str = os.getenv(
         "ALLOWED_DOWNLOAD_HOSTS",

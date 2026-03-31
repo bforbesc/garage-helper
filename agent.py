@@ -12,11 +12,14 @@ from tools import applescript, audio, composer, computer_control, music_theory, 
 
 SYSTEM_PROMPT = """You are GarageBand Copilot, an AI music production assistant operating GarageBand on macOS.
 Rules:
+- Keep work in the currently open GarageBand project by default.
+- Do not open/replace/create a different project unless the user explicitly asks (for example: "new project", "open project").
 - Act quickly: prefer `garageband_shortcut` or `computer_action` with `key_sequence` before click-heavy flows.
 - For "create melody/beat/song" requests, prefer `create_music_in_garageband` so the user gets an actual MIDI loaded fast.
 - Use music tools to create real musical output (melody/chords/bass/drums) and export MIDI when useful.
 - For note/chord precision, use music theory tools before UI entry.
 - After any screen-modifying computer action, verify with a screenshot path.
+- Do not claim UI edits are done unless tool results show `ok=true` and `focus_confirmed=true`.
 - If the same action fails, do not retry more than once; ask user to refocus GarageBand.
 - Keep replies concise and execution-focused.
 """
@@ -29,13 +32,18 @@ class GarageBandAgent:
         self.openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
         # Keep only plain text turns in memory; tool chatter remains per-request to avoid malformed histories.
         self.text_history: list[dict[str, str]] = []
+        # Safety default: assume user is already working in a project; avoid silent project replacement.
+        self.project_initialized = True
 
         self.tool_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "computer_action": self._tool_computer_action,
-            "garageband_shortcut": lambda i: computer_control.garageband_shortcut(i["name"]),
+            "garageband_shortcut": self._tool_garageband_shortcut,
+            "get_frontmost_app": lambda i: applescript.get_frontmost_app(),
+            "ensure_garageband_focus": lambda i: applescript.ensure_garageband_frontmost(i.get("timeout_ms", 1500)),
+            "new_garageband_project": self._tool_new_garageband_project,
             "run_applescript": lambda i: applescript.run_applescript(i["script"]),
             "launch_garageband": lambda i: applescript.launch_garageband(),
-            "open_file_in_garageband": lambda i: applescript.open_file_in_garageband(i["path"]),
+            "open_file_in_garageband": self._tool_open_file_in_garageband,
             "get_chord_progression": lambda i: music_theory.get_chord_progression(
                 i.get("key", "C"), i.get("progression", "I-V-vi-IV"), i.get("octave", 4)
             ),
@@ -86,6 +94,17 @@ class GarageBandAgent:
                 "description": "Run named GarageBand shortcut quickly. Names: play_pause, new_track_dialog, open_editor, toggle_library, toggle_smart_controls, toggle_cycle, toggle_metronome, undo, redo, duplicate_region, split_at_playhead, save_project.",
                 "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
             },
+            {"name": "get_frontmost_app", "description": "Return current frontmost macOS app name.", "input_schema": {"type": "object", "properties": {}}},
+            {
+                "name": "ensure_garageband_focus",
+                "description": "Activate GarageBand and confirm it is frontmost before UI actions.",
+                "input_schema": {"type": "object", "properties": {"timeout_ms": {"type": "integer"}}},
+            },
+            {
+                "name": "new_garageband_project",
+                "description": "Open GarageBand new project dialog. Use only when user explicitly asks for a new project.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
             {"name": "run_applescript", "description": "Run AppleScript snippet.", "input_schema": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}},
             {"name": "launch_garageband", "description": "Launch and activate GarageBand app.", "input_schema": {"type": "object", "properties": {}}},
             {"name": "open_file_in_garageband", "description": "Open local file (for example MIDI) in GarageBand.", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
@@ -112,7 +131,7 @@ class GarageBandAgent:
             },
             {
                 "name": "create_music_in_garageband",
-                "description": "Fast path: compose melody/bass/drums MIDI and open it in GarageBand in one call.",
+                "description": "Fast path: compose melody/bass/drums MIDI and optionally open it in GarageBand. Set replace_current_project=true only when user explicitly asks for a new/open project.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -123,6 +142,7 @@ class GarageBandAgent:
                         "bpm": {"type": "integer"},
                         "seed": {"type": "integer"},
                         "open_in_garageband": {"type": "boolean"},
+                        "replace_current_project": {"type": "boolean"},
                     },
                 },
             },
@@ -135,6 +155,7 @@ class GarageBandAgent:
     def reset(self) -> None:
         with self._lock:
             self.text_history = []
+            self.project_initialized = True
 
     def handle_user_message(self, text: str) -> dict[str, Any]:
         with self._lock:
@@ -279,11 +300,74 @@ class GarageBandAgent:
             raise ValueError(f"Unknown tool: {tool_name}")
         return self.tool_handlers[tool_name](tool_input)
 
+    def _ensure_focus_for_ui_actions(self) -> dict[str, Any]:
+        if not settings.allow_applescript:
+            return {"ok": True, "focus_check_skipped": True, "reason": "AppleScript disabled"}
+        if settings.auto_focus_garageband:
+            return applescript.ensure_garageband_frontmost(timeout_ms=1500)
+        front = applescript.get_frontmost_app()
+        if front.get("ok") and front.get("app", "").lower() == "garageband":
+            return {"ok": True, "frontmost_app": front.get("app", "")}
+        return {
+            "ok": False,
+            "error": "GarageBand is not frontmost and AUTO_FOCUS_GARAGEBAND=false",
+            "frontmost_app": front.get("app", ""),
+            "focus_error": front.get("stderr", "") or front.get("error", ""),
+        }
+
+    def _attach_focus_verification(self, result: dict[str, Any]) -> dict[str, Any]:
+        if not settings.allow_applescript:
+            result["focus_check_skipped"] = True
+            return result
+        front = applescript.get_frontmost_app()
+        result["frontmost_after"] = front.get("app", "")
+        result["focus_query_ok"] = bool(front.get("ok"))
+        focus_confirmed = bool(front.get("ok")) and front.get("app", "").lower() == "garageband"
+        result["focus_confirmed"] = focus_confirmed
+        if not focus_confirmed:
+            result["ok"] = False
+            result["error"] = result.get("error") or "Action sent but GarageBand focus was not confirmed."
+        return result
+
+    def _tool_garageband_shortcut(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        focus = self._ensure_focus_for_ui_actions()
+        if not focus.get("ok"):
+            return {"ok": False, "error": "Cannot run shortcut without GarageBand focus.", "focus": focus}
+        result = computer_control.garageband_shortcut(tool_input["name"])
+        result = self._attach_focus_verification(result)
+        result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
+        return result
+
+    def _tool_new_garageband_project(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        result = applescript.new_garageband_project_dialog()
+        if result.get("ok"):
+            self.project_initialized = True
+        return result
+
+    def _tool_open_file_in_garageband(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        result = applescript.open_file_in_garageband(tool_input["path"])
+        if result.get("ok"):
+            self.project_initialized = True
+        return result
+
     def _tool_computer_action(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         action = tool_input.get("action")
         if action == "screenshot":
             shot = computer_control.screenshot()
-            return {"ok": True, "path": shot.get("path", "")}
+            response = {"ok": True, "path": shot.get("path", "")}
+            if settings.allow_applescript:
+                front = applescript.get_frontmost_app()
+                response["frontmost_app"] = front.get("app", "")
+                response["focus_query_ok"] = bool(front.get("ok"))
+            return response
+        focus = self._ensure_focus_for_ui_actions()
+        if not focus.get("ok"):
+            return {
+                "ok": False,
+                "error": "Blocked UI action because GarageBand focus is not confirmed.",
+                "focus": focus,
+                "post_action_screenshot": computer_control.screenshot().get("path", ""),
+            }
         if action == "click":
             result = computer_control.click(
                 x=int(tool_input["x"]),
@@ -291,14 +375,17 @@ class GarageBandAgent:
                 button=tool_input.get("button", "left"),
                 clicks=int(tool_input.get("clicks", 1)),
             )
+            result = self._attach_focus_verification(result)
             result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "type":
             result = computer_control.type_text(tool_input["text"])
+            result = self._attach_focus_verification(result)
             result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "key":
             result = computer_control.key_press(tool_input["key"])
+            result = self._attach_focus_verification(result)
             result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "key_sequence":
@@ -306,10 +393,12 @@ class GarageBandAgent:
                 keys=tool_input.get("keys", []),
                 inter_key_delay_ms=int(tool_input.get("inter_key_delay_ms", 70)),
             )
+            result = self._attach_focus_verification(result)
             result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "scroll":
             result = computer_control.scroll(int(tool_input.get("amount", -400)))
+            result = self._attach_focus_verification(result)
             result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         if action == "drag":
@@ -318,6 +407,7 @@ class GarageBandAgent:
                 y=int(tool_input["y"]),
                 duration=float(tool_input.get("duration", 0.2)),
             )
+            result = self._attach_focus_verification(result)
             result["post_action_screenshot"] = computer_control.screenshot().get("path", "")
             return result
         raise ValueError(f"Unsupported action: {action}")
@@ -334,15 +424,28 @@ class GarageBandAgent:
         if not composition.get("ok"):
             return composition
         open_requested = bool(tool_input.get("open_in_garageband", True))
+        replace_current = bool(tool_input.get("replace_current_project", False))
+        if open_requested and self.project_initialized and not replace_current:
+            return {
+                "ok": False,
+                "error": (
+                    "Refusing to replace current project without explicit permission. "
+                    "Set replace_current_project=true only when the user explicitly asks for a new/open project."
+                ),
+                "composition": composition,
+                "opened_in_garageband": False,
+            }
         launch_result = applescript.launch_garageband() if open_requested else {"ok": True, "skipped": True}
-        open_result = (
-            applescript.open_file_in_garageband(composition["midi_file_path"]) if open_requested else {"ok": True, "skipped": True}
-        )
+        open_result = applescript.open_file_in_garageband(composition["midi_file_path"]) if open_requested else {"ok": True, "skipped": True}
+        opened = bool(open_requested and launch_result.get("ok") and open_result.get("ok"))
+        if opened:
+            self.project_initialized = True
         return {
             "ok": bool(composition.get("ok")) and bool(launch_result.get("ok")) and bool(open_result.get("ok")),
             "composition": composition,
             "launch_result": launch_result,
             "open_result": open_result,
+            "opened_in_garageband": opened,
         }
 
     def _openai_tools(self) -> list[dict[str, Any]]:

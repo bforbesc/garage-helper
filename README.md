@@ -7,6 +7,7 @@ Python + Flask assistant for music production in GarageBand with:
 - Music theory tools with exact MIDI note output
 - Composition tool that generates melody/chords/bass/drums and exports MIDI (`compose_music_idea`)
 - One-step compose+import flow (`create_music_in_garageband`) for fast GarageBand results
+- Project safety guard: agent stays in current project unless explicitly told to open/create a new one
 - Voice input via browser speech recognition
 - Freesound sample search/download
 - Audio preview (synthesized MIDI notes + local sample playback)
@@ -38,10 +39,12 @@ Optional:
 - `OPENAI_MAX_OUTPUT_TOKENS` model output cap per call (default `900`)
 - `HISTORY_MAX_TURNS` retained text turns for context (default `10`)
 - `ENABLE_COMPUTER_CONTROL=true` to allow click/type/key/screenshot actions
+- `AUTO_FOCUS_GARAGEBAND=true|false` auto-activate and focus GarageBand before UI actions (default `true`)
 - `ALLOW_APPLESCRIPT=true|false`
 - `ALLOWED_DOWNLOAD_HOSTS` comma-separated host allowlist
 - `MAX_DOWNLOAD_MB` max per-file download size
 - `AUTO_OPEN_GARAGEBAND=true|false` (default `true`)
+- `AUTO_OPEN_BROWSER=true|false` (default `false`)
 
 ## Run
 ```bash
