@@ -43,6 +43,13 @@ CHORD_QUALITIES = {
     "min7": [0, 3, 7, 10],
     "sus2": [0, 2, 7],
     "sus4": [0, 5, 7],
+    "9": [0, 4, 7, 10, 14],
+    "min9": [0, 3, 7, 10, 14],
+    "11": [0, 4, 7, 10, 14, 17],
+    "13": [0, 4, 7, 10, 14, 21],
+    "add9": [0, 4, 7, 14],
+    "6": [0, 4, 7, 9],
+    "min6": [0, 3, 7, 9],
 }
 
 GENRE_ARRANGEMENTS = {
@@ -97,6 +104,15 @@ def _parse_chord(chord: str) -> ParsedChord:
         "min": "min",
         "major": "maj",
         "minor": "min",
+        "9": "9",
+        "min9": "min9",
+        "m9": "min9",
+        "11": "11",
+        "13": "13",
+        "add9": "add9",
+        "6": "6",
+        "m6": "min6",
+        "min6": "min6",
     }
     quality = mapping.get(quality_raw, quality_raw or "maj")
     if quality not in CHORD_QUALITIES:
@@ -130,22 +146,35 @@ def get_scale_notes(root: str, scale_type: str = "major", octave: int = 4) -> di
     }
 
 
-def get_chord_progression(key: str = "C", progression: str = "I-V-vi-IV", octave: int = 4) -> dict:
-    roman_map_major = {
-        "I": ("maj", 0),
-        "ii": ("min", 2),
-        "iii": ("min", 4),
-        "IV": ("maj", 5),
-        "V": ("maj", 7),
-        "vi": ("min", 9),
-        "vii": ("dim", 11),
-    }
+ROMAN_MAP_MAJOR = {
+    "I": ("maj", 0),
+    "ii": ("min", 2),
+    "iii": ("min", 4),
+    "IV": ("maj", 5),
+    "V": ("maj", 7),
+    "vi": ("min", 9),
+    "vii": ("dim", 11),
+}
+
+ROMAN_MAP_MINOR = {
+    "i": ("min", 0),
+    "ii": ("dim", 2),
+    "III": ("maj", 3),
+    "iv": ("min", 5),
+    "v": ("min", 7),
+    "VI": ("maj", 8),
+    "VII": ("maj", 10),
+}
+
+
+def get_chord_progression(key: str = "C", progression: str = "I-V-vi-IV", octave: int = 4, mode: str = "major") -> dict:
+    roman_map = ROMAN_MAP_MINOR if mode.strip().lower() == "minor" else ROMAN_MAP_MAJOR
     root = _normalize_note(key)
     root_semitone = NOTE_TO_SEMITONE[root]
     steps = [step.strip() for step in progression.split("-") if step.strip()]
     chords = []
     for step in steps:
-        quality, offset = roman_map_major.get(step, ("maj", 0))
+        quality, offset = roman_map.get(step, ("maj", 0))
         chord_root = SEMITONE_TO_NOTE[(root_semitone + offset) % 12]
         chord_name = f"{chord_root}{'m' if quality == 'min' else ''}"
         chord_data = get_midi_notes_for_chord(f"{chord_root}{quality if quality not in ['maj', 'min'] else ('min' if quality == 'min' else '')}", octave)
@@ -170,6 +199,17 @@ def suggest_arrangement(genre: str = "pop") -> dict:
 def get_tempo_suggestion(genre: str = "pop") -> dict:
     normalized = genre.strip().lower()
     return {"genre": normalized, **GENRE_TEMPO.get(normalized, GENRE_TEMPO["pop"])}
+
+
+def invert_chord(midi_notes: list[int], inversion: int = 1) -> dict:
+    """Rotate the lowest N notes up an octave to create chord inversions."""
+    if not midi_notes:
+        raise ValueError("midi_notes cannot be empty")
+    notes = sorted(midi_notes)
+    inversion = max(0, min(inversion, len(notes) - 1))
+    for _ in range(inversion):
+        notes.append(notes.pop(0) + 12)
+    return {"midi_notes": notes, "inversion": inversion}
 
 
 def transpose_chord(chord: str, semitones: int, octave: int = 4) -> dict:

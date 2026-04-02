@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import time
 from datetime import datetime
 from pathlib import Path
@@ -7,6 +9,7 @@ from pathlib import Path
 import mss
 import mss.tools
 import pyautogui
+from PIL import Image
 
 from config import settings
 
@@ -26,6 +29,19 @@ GARAGEBAND_SHORTCUTS = {
     "duplicate_region": "command+r",
     "split_at_playhead": "command+t",
     "save_project": "command+s",
+    "select_track_above": "up",
+    "select_track_below": "down",
+    "go_to_beginning": "return",
+    "record": "r",
+    "delete_selected": "backspace",
+    "select_all": "command+a",
+    "join_regions": "command+j",
+    "zoom_in": "command+right",
+    "zoom_out": "command+left",
+    "musical_typing": "command+shift+k",
+    "create_new_project": "command+n",
+    "export_song": "command+shift+e",
+    "close_project": "command+w",
 }
 
 
@@ -40,20 +56,29 @@ def _ensure_screenshots_dir() -> Path:
     return path
 
 
-def screenshot(include_base64: bool = False) -> dict:
+def _downscale_screenshot(path: Path, max_width: int) -> str:
+    """Open image, resize if wider than *max_width*, return base64 PNG string."""
+    img = Image.open(path)
+    if img.width <= max_width:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    ratio = max_width / img.width
+    new_size = (max_width, int(img.height * ratio))
+    img = img.resize(new_size, Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def screenshot() -> dict:
     out_dir = _ensure_screenshots_dir()
     filename = f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
     path = out_dir / filename
     with mss.mss() as sct:
         shot = sct.grab(sct.monitors[0])
         mss.tools.to_png(shot.rgb, shot.size, output=str(path))
-    if include_base64:
-        import base64  # local import to avoid paying cost on every screenshot call
-
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        return {"path": str(path), "base64_png": b64}
-    return {"path": str(path)}
+    b64 = _downscale_screenshot(path, settings.screenshot_max_width)
+    return {"path": str(path), "base64_png": b64}
 
 
 def click(x: int, y: int, button: str = "left", clicks: int = 1) -> dict:
