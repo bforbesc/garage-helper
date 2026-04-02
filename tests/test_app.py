@@ -22,3 +22,10 @@ def test_chat_endpoint_with_mocked_agent(monkeypatch):
     assert data["ok"] is True
     assert data["text"] == "echo:hello"
 
+
+def test_index_includes_ui_timeout_setting():
+    client = app_module.app.test_client()
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert f'data-request-timeout-ms="{app_module.settings.ui_request_timeout_ms}"' in html

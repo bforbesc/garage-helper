@@ -23,7 +23,7 @@ def inject_asset_version():
     app_js = Path(app.root_path) / "static" / "app.js"
     style_css = Path(app.root_path) / "static" / "style.css"
     version = int(max(app_js.stat().st_mtime, style_css.stat().st_mtime))
-    return {"asset_version": version}
+    return {"asset_version": version, "ui_request_timeout_ms": settings.ui_request_timeout_ms}
 
 
 @app.get("/api/health")
@@ -32,7 +32,7 @@ def api_health():
         {
             "ok": True,
             "provider": agent.provider,
-            "openai_key_loaded": bool(settings.openai_api_key),
+            "api_key_loaded": bool(settings.anthropic_api_key),
             "computer_control_enabled": settings.enable_computer_control,
             "applescript_enabled": settings.allow_applescript,
         }

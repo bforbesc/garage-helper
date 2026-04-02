@@ -8,6 +8,11 @@ const statusEl = document.getElementById("status");
 let recognition = null;
 let recognizing = false;
 
+const defaultRequestTimeoutMs = 180000;
+const configuredTimeout = Number.parseInt(document.documentElement.dataset.requestTimeoutMs || "", 10);
+const requestTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : defaultRequestTimeoutMs;
+const requestTimeoutLabel = `${Math.round(requestTimeoutMs / 1000)}s`;
+
 function addMessage(role, text) {
   const el = document.createElement("div");
   el.className = `msg ${role}`;
@@ -22,7 +27,7 @@ function setStatus(text) {
 
 async function postJSON(url, body) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -30,7 +35,16 @@ async function postJSON(url, body) {
       signal: controller.signal,
       body: JSON.stringify(body || {}),
     });
-    return res.json();
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    return data;
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      throw new Error(`Request timed out after ${requestTimeoutLabel}. Try a shorter step or increase UI_REQUEST_TIMEOUT_MS.`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
   }

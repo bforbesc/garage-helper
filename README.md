@@ -34,6 +34,7 @@ Optional:
 - `LLM_PROVIDER=openai` (default is `openai`)
 - `LLM_REQUEST_TIMEOUT_SEC` timeout per model API call (default `25`)
 - `LLM_TOTAL_TIMEOUT_SEC` max total agent turn time (default `55`)
+- `UI_REQUEST_TIMEOUT_MS` frontend `fetch` timeout for `/api/chat` and other UI requests (default `180000`)
 - `OPENAI_REASONING_EFFORT` (`low|medium|high`, default `low`)
 - `OPENAI_VERBOSITY` (`low|medium|high`, default `low`)
 - `OPENAI_MAX_OUTPUT_TOKENS` model output cap per call (default `900`)
