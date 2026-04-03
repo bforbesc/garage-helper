@@ -59,6 +59,7 @@ class GarageBandAgent:
             "set_tempo": self._tool_set_tempo,
             "create_software_instrument_track": self._tool_create_software_instrument_track,
             "select_track": self._tool_select_track,
+            "add_drummer_tracks": lambda i: applescript.add_drummer_tracks(i.get("repeats", 2)),
         }
 
         self.tools = [
@@ -140,7 +141,7 @@ class GarageBandAgent:
             },
             {
                 "name": "compose_music_idea",
-                "description": "Create melody/chords/bass/drums and export a MIDI file. Returns MIDI path and note events.",
+                "description": "Create melody/chords/bass/drums and export MIDI + rendered WAV. Returns file paths and note events.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -157,7 +158,11 @@ class GarageBandAgent:
             },
             {
                 "name": "create_music_in_garageband",
-                "description": "Fast path: compose melody/bass/drums MIDI and optionally open it in GarageBand. Set replace_current_project=true only when user explicitly asks for a new/open project.",
+                "description": (
+                    "Fast path: compose melody/bass/drums/chords, export MIDI+WAV, optionally open MIDI in GarageBand, "
+                    "and optionally play the rendered WAV. Set replace_current_project=true only when user explicitly asks "
+                    "for a new/open project."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -167,8 +172,11 @@ class GarageBandAgent:
                         "bars": {"type": "integer"},
                         "bpm": {"type": "integer"},
                         "seed": {"type": "integer"},
+                        "include_tracks": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['melody','bass','drums','chords']"},
+                        "style_hint": {"type": "string", "description": "e.g. 'legato', 'sparse', 'busy', 'swing'"},
                         "open_in_garageband": {"type": "boolean"},
                         "replace_current_project": {"type": "boolean"},
+                        "auto_play_rendered_audio": {"type": "boolean"},
                     },
                 },
             },
@@ -201,6 +209,19 @@ class GarageBandAgent:
                     "type": "object",
                     "properties": {"index": {"type": "integer", "description": "0-based track index"}},
                     "required": ["index"],
+                },
+            },
+            {
+                "name": "add_drummer_tracks",
+                "description": (
+                    "Add GarageBand Drummer tracks using app defaults. "
+                    "Use repeats=2 to create a primary and second-beat drummer layer."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "repeats": {"type": "integer", "description": "How many Drummer tracks to add (default 2)"},
+                    },
                 },
             },
         ]
@@ -497,11 +518,14 @@ class GarageBandAgent:
             bars=tool_input.get("bars", 4),
             bpm=tool_input.get("bpm"),
             seed=tool_input.get("seed"),
+            include_tracks=tool_input.get("include_tracks"),
+            style_hint=tool_input.get("style_hint"),
         )
         if not composition.get("ok"):
             return composition
         open_requested = bool(tool_input.get("open_in_garageband", True))
         replace_current = bool(tool_input.get("replace_current_project", False))
+        auto_play = bool(tool_input.get("auto_play_rendered_audio", False))
         if open_requested and self.project_initialized and not replace_current:
             return {
                 "ok": False,
@@ -515,14 +539,25 @@ class GarageBandAgent:
         launch_result = applescript.launch_garageband() if open_requested else {"ok": True, "skipped": True}
         open_result = applescript.open_file_in_garageband(composition["midi_file_path"]) if open_requested else {"ok": True, "skipped": True}
         opened = bool(open_requested and launch_result.get("ok") and open_result.get("ok"))
+        if auto_play:
+            audio_path = composition.get("audio_file_path", "")
+            play_result = audio.play_audio_file(audio_path) if audio_path else {"ok": False, "error": "No rendered audio file was produced."}
+        else:
+            play_result = {"ok": True, "skipped": True}
+        played_audio = bool(auto_play and play_result.get("ok"))
         if opened:
             self.project_initialized = True
         return {
-            "ok": bool(composition.get("ok")) and bool(launch_result.get("ok")) and bool(open_result.get("ok")),
+            "ok": bool(composition.get("ok"))
+            and bool(launch_result.get("ok"))
+            and bool(open_result.get("ok"))
+            and (bool(play_result.get("ok")) or not auto_play),
             "composition": composition,
             "launch_result": launch_result,
             "open_result": open_result,
             "opened_in_garageband": opened,
+            "play_result": play_result,
+            "played_rendered_audio": played_audio,
         }
 
     def _tool_set_tempo(self, tool_input: dict[str, Any]) -> dict[str, Any]:

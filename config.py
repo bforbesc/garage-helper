@@ -19,6 +19,7 @@ class Settings:
     llm_request_timeout_sec: float = float(os.getenv("LLM_REQUEST_TIMEOUT_SEC", "25"))
     llm_total_timeout_sec: float = float(os.getenv("LLM_TOTAL_TIMEOUT_SEC", "120"))
     ui_request_timeout_ms: int = int(os.getenv("UI_REQUEST_TIMEOUT_MS", "180000"))
+    enable_voice_input: bool = os.getenv("ENABLE_VOICE_INPUT", "false").lower() in {"1", "true", "yes"}
     history_max_turns: int = int(os.getenv("HISTORY_MAX_TURNS", "10"))
     ui_port: int = int(os.getenv("PORT", "5050"))
     flask_debug: bool = os.getenv("FLASK_DEBUG", "false").lower() in {"1", "true", "yes"}

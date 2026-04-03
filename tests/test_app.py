@@ -29,3 +29,5 @@ def test_index_includes_ui_timeout_setting():
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
     assert f'data-request-timeout-ms="{app_module.settings.ui_request_timeout_ms}"' in html
+    expected_voice_flag = "true" if app_module.settings.enable_voice_input else "false"
+    assert f'data-voice-enabled="{expected_voice_flag}"' in html

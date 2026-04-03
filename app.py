@@ -4,6 +4,7 @@ import time
 import traceback
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, jsonify, render_template, request
 
@@ -23,7 +24,11 @@ def inject_asset_version():
     app_js = Path(app.root_path) / "static" / "app.js"
     style_css = Path(app.root_path) / "static" / "style.css"
     version = int(max(app_js.stat().st_mtime, style_css.stat().st_mtime))
-    return {"asset_version": version, "ui_request_timeout_ms": settings.ui_request_timeout_ms}
+    return {
+        "asset_version": version,
+        "ui_request_timeout_ms": settings.ui_request_timeout_ms,
+        "voice_input_enabled": settings.enable_voice_input,
+    }
 
 
 @app.get("/api/health")
@@ -110,6 +115,63 @@ def api_chat():
 def api_reset():
     agent.reset()
     return jsonify({"ok": True})
+
+
+@app.post("/api/workflow/create-jungle")
+def api_workflow_create_jungle():
+    payload = request.get_json(force=True, silent=True) or {}
+    bars = int(payload.get("bars", 8))
+    bpm = int(payload.get("bpm", 120))
+    key = payload.get("key", "C")
+    replace_current_project = bool(payload.get("replace_current_project", True))
+    auto_play = bool(payload.get("auto_play_rendered_audio", False))
+    try:
+        result = agent._tool_create_music_in_garageband(
+            {
+                "genre": "jungle",
+                "key": key,
+                "scale_type": "minor",
+                "bars": bars,
+                "bpm": bpm,
+                "include_tracks": ["melody", "bass", "drums"],
+                "style_hint": "busy",
+                "open_in_garageband": True,
+                "replace_current_project": replace_current_project,
+                "auto_play_rendered_audio": auto_play,
+            }
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/workflow/add-drummer-second-beat")
+def api_workflow_add_drummer_second_beat():
+    payload = request.get_json(force=True, silent=True) or {}
+    repeats = int(payload.get("repeats", 2))
+    try:
+        drummer_result = applescript.add_drummer_tracks(repeats=repeats)
+        return jsonify(
+            {
+                "ok": bool(drummer_result.get("ok")),
+                "result": drummer_result,
+                "note": "Drummer tracks use GarageBand default type set to NTCDrummer.",
+            }
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/workflow/play-latest")
+def api_workflow_play_latest():
+    try:
+        latest = sorted(Path(settings.downloads_dir).glob("idea_*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not latest:
+            return jsonify({"ok": False, "error": "No rendered WAV files found in downloads."}), 404
+        play_result = audio.play_audio_file(str(latest[0]))
+        return jsonify({"ok": bool(play_result.get("ok")), "latest_audio": str(latest[0].resolve()), "play_result": play_result})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.get("/api/samples/search")

@@ -1,5 +1,9 @@
 <!doctype html>
-<html lang="en" data-request-timeout-ms="{{ ui_request_timeout_ms }}">
+<html
+  lang="en"
+  data-request-timeout-ms="{{ ui_request_timeout_ms }}"
+  data-voice-enabled="{{ 'true' if voice_input_enabled else 'false' }}"
+>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -20,6 +24,11 @@
         <div class="row controls">
           <button id="micBtn">Start Mic</button>
           <button id="resetBtn" class="secondary">Reset Chat</button>
+        </div>
+        <div class="row controls">
+          <button id="createJungleBtn">Create Jungle Song</button>
+          <button id="addDrummerBtn" class="secondary">Add Drummer + 2nd Beat</button>
+          <button id="playLatestBtn" class="secondary">Play Latest Render</button>
         </div>
       </section>
     </main>

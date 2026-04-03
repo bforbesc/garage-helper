@@ -27,6 +27,61 @@ def launch_garageband() -> dict:
     return run_applescript(script)
 
 
+def _garageband_window_titles() -> list[str]:
+    script = """
+tell application "GarageBand"
+  if (count of windows) is 0 then return ""
+  return name of every window
+end tell
+"""
+    result = run_applescript(script)
+    if not result.get("ok"):
+        return []
+    raw = (result.get("stdout") or "").strip()
+    if not raw:
+        return []
+    return [title.strip() for title in raw.split(",") if title.strip()]
+
+
+def _has_real_project_window(window_titles: list[str]) -> bool:
+    if not window_titles:
+        return False
+    return any(title.lower() != "choose a project" for title in window_titles)
+
+
+def _wait_for_project_window(timeout_sec: float = 10.0) -> dict:
+    deadline = time.monotonic() + max(1.0, timeout_sec)
+    last_titles: list[str] = []
+    while time.monotonic() < deadline:
+        titles = _garageband_window_titles()
+        if titles:
+            last_titles = titles
+        if _has_real_project_window(titles):
+            return {"ok": True, "windows": titles}
+        time.sleep(0.25)
+    return {"ok": False, "windows": last_titles}
+
+
+def _open_file_via_dialog(file_path: Path) -> dict:
+    escaped_path = str(file_path).replace("\\", "\\\\").replace('"', '\\"')
+    script = f"""
+set targetPath to "{escaped_path}"
+tell application "GarageBand" to activate
+delay 0.5
+tell application "System Events"
+  keystroke "o" using {{command down}}
+  delay 0.8
+  keystroke "g" using {{command down, shift down}}
+  delay 0.4
+  keystroke targetPath
+  key code 36
+  delay 0.5
+  key code 36
+end tell
+"""
+    return run_applescript(script)
+
+
 def get_frontmost_app() -> dict:
     script = 'tell application "System Events" to get name of first application process whose frontmost is true'
     result = run_applescript(script)
@@ -83,14 +138,95 @@ def open_file_in_garageband(path: str) -> dict:
     file_path = Path(path).expanduser()
     if not file_path.exists():
         return {"ok": False, "error": f"File not found: {file_path}"}
+    focus_result = ensure_garageband_frontmost(timeout_ms=2500)
     proc = subprocess.run(
         ["open", "-a", "GarageBand", str(file_path)],
+        capture_output=True,
+        text=True,
+    )
+    verify_open = _wait_for_project_window(timeout_sec=12.0)
+    fallback = {"ok": True, "skipped": True}
+    if not verify_open.get("ok") and settings.allow_applescript:
+        fallback = _open_file_via_dialog(file_path)
+        verify_open = _wait_for_project_window(timeout_sec=12.0)
+    front = get_frontmost_app()
+    return {
+        "ok": proc.returncode == 0 and bool(verify_open.get("ok")),
+        "returncode": proc.returncode,
+        "path": str(file_path.resolve()),
+        "focus_result": focus_result,
+        "verification": verify_open,
+        "fallback_result": fallback,
+        "frontmost_after": front.get("app", ""),
+        "stderr": proc.stderr.strip(),
+    }
+
+
+def set_new_track_default(track_type: str) -> dict:
+    """
+    Configure GarageBand's new-track default type in macOS preferences.
+    Known values include NTCSoftwareInstrument and NTCDrummer.
+    """
+    proc = subprocess.run(
+        [
+            "defaults",
+            "write",
+            "com.apple.garageband10",
+            "NewTrackSheetDefaults",
+            "-dict",
+            "DefaultTrackType",
+            track_type,
+            "GroupID",
+            "3",
+            "ShowDetails",
+            "1",
+        ],
         capture_output=True,
         text=True,
     )
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
-        "path": str(file_path.resolve()),
+        "track_type": track_type,
         "stderr": proc.stderr.strip(),
+    }
+
+
+def add_new_track_from_menu(repeats: int = 1, delay_sec: float = 0.7) -> dict:
+    focus = ensure_garageband_frontmost(timeout_ms=2500)
+    if not focus.get("ok"):
+        return {"ok": False, "error": "GarageBand focus not confirmed", "focus": focus}
+
+    repeats = max(1, min(int(repeats), 8))
+    script = f'''
+tell application "GarageBand" to activate
+delay 0.2
+tell application "System Events"
+  tell process "GarageBand"
+    repeat {repeats} times
+      click menu item "New Track…" of menu "Track" of menu bar 1
+      delay {max(0.2, float(delay_sec))}
+    end repeat
+  end tell
+end tell
+'''
+    result = run_applescript(script)
+    windows = run_applescript('tell application "GarageBand" to if (count of windows) > 0 then return name of every window')
+    return {
+        "ok": bool(result.get("ok")),
+        "repeats": repeats,
+        "script_result": result,
+        "windows": windows.get("stdout", ""),
+    }
+
+
+def add_drummer_tracks(repeats: int = 1) -> dict:
+    default_set = set_new_track_default("NTCDrummer")
+    if not default_set.get("ok"):
+        return {"ok": False, "error": "Failed to set Drummer as default track type", "default_set": default_set}
+    added = add_new_track_from_menu(repeats=repeats)
+    return {
+        "ok": bool(default_set.get("ok")) and bool(added.get("ok")),
+        "default_set": default_set,
+        "added": added,
     }

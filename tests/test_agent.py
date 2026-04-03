@@ -92,3 +92,47 @@ def test_new_project_tool_updates_project_state(monkeypatch):
     out = a._tool_new_garageband_project({})
     assert out["ok"] is True
     assert a.project_initialized is True
+
+
+def test_create_music_in_garageband_auto_play_rendered_audio(monkeypatch):
+    a = agent_module.GarageBandAgent()
+    a.project_initialized = False
+
+    monkeypatch.setattr(
+        agent_module.composer,
+        "compose_music_idea",
+        lambda **_: {"ok": True, "midi_file_path": "/tmp/test.mid", "audio_file_path": "/tmp/test.wav"},
+    )
+    monkeypatch.setattr(agent_module.applescript, "launch_garageband", lambda: {"ok": True})
+    monkeypatch.setattr(agent_module.applescript, "open_file_in_garageband", lambda path: {"ok": True, "path": path})
+
+    seen = {}
+
+    def fake_play(path):
+        seen["path"] = path
+        return {"ok": True, "path": path}
+
+    monkeypatch.setattr(agent_module.audio, "play_audio_file", fake_play)
+
+    out = a._tool_create_music_in_garageband({"auto_play_rendered_audio": True})
+    assert out["ok"] is True
+    assert out["played_rendered_audio"] is True
+    assert out["play_result"]["ok"] is True
+    assert seen["path"] == "/tmp/test.wav"
+
+
+def test_create_music_in_garageband_auto_play_missing_audio_fails(monkeypatch):
+    a = agent_module.GarageBandAgent()
+    a.project_initialized = False
+
+    monkeypatch.setattr(
+        agent_module.composer,
+        "compose_music_idea",
+        lambda **_: {"ok": True, "midi_file_path": "/tmp/test.mid"},
+    )
+    monkeypatch.setattr(agent_module.applescript, "launch_garageband", lambda: {"ok": True})
+    monkeypatch.setattr(agent_module.applescript, "open_file_in_garageband", lambda path: {"ok": True, "path": path})
+
+    out = a._tool_create_music_in_garageband({"auto_play_rendered_audio": True})
+    assert out["ok"] is False
+    assert out["play_result"]["ok"] is False

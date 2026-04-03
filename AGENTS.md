@@ -10,10 +10,10 @@ A Python-based AI agent with a visual UI that helps produce music in GarageBand 
 
 ## Tech Stack
 - **Language**: Python
-- **AI**: OpenAI SDK with tool-calling orchestration
+- **AI**: Anthropic SDK with tool-calling orchestration
 - **UI**: Flask web app (`templates/index.html` + `static/`)
 - **Computer control**: `pyautogui` for executing clicks/keys, `mss` for screenshots
-- **Audio**: Needs a library for MIDI synthesis/playback (e.g., `pygame.midi`, `fluidsynth`, or `sounddevice`)
+- **Audio**: `numpy` + `sounddevice` + `soundfile` for synthesized preview, rendered WAV playback
 - **Voice**: Speech-to-text (browser Web Speech API)
 - **Web**: `requests` or browser automation for sample sites; freesound.org has an API
 
@@ -21,7 +21,7 @@ A Python-based AI agent with a visual UI that helps produce music in GarageBand 
 
 ### Agent Loop (`agent.py`)
 - Maintains in-memory message history for the session
-- Calls OpenAI Chat Completions with function tools
+- Calls Anthropic Messages API with tools
 - Dispatches tool calls: computer control, music theory, AppleScript, web search, audio playback, composition
 - Auto-injects screenshot after screen-modifying actions so Codex never acts on stale UI state
 - Configurable delays for GarageBand UI animation settling
@@ -36,7 +36,7 @@ A Python-based AI agent with a visual UI that helps produce music in GarageBand 
    - `suggest_arrangement` — genre-aware song structure
    - `get_tempo_suggestion` — genre → BPM + time signature
    - `transpose_chord` — transpose with MIDI output
-4. **Composition** (`compose_music_idea`, `create_music_in_garageband`) — generate melody/bass/drums and open MIDI in GarageBand
+4. **Composition** (`compose_music_idea`, `create_music_in_garageband`) — generate melody/bass/drums/chords, export MIDI + WAV, open MIDI in GarageBand, optionally play rendered song
 5. **Web/samples** — search and download from sample sites
 6. **Audio playback** — synthesize and play MIDI notes or downloaded samples through speakers
 
@@ -58,5 +58,5 @@ Instructs Codex to: always screenshot before acting, prefer keyboard shortcuts, 
 ## Current Defaults
 - UI framework: Flask web app
 - Sample source: Freesound API
-- Voice input: Browser Web Speech API
+- Voice input: Browser Web Speech API (disabled by default; enable with `ENABLE_VOICE_INPUT=true`)
 - Audio synthesis/playback: `numpy` + `sounddevice` + `soundfile`

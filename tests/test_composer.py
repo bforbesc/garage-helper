@@ -15,3 +15,6 @@ def test_compose_music_idea_generates_midi(tmp_path, monkeypatch):
     midi_path = Path(result["midi_file_path"])
     assert midi_path.exists()
     assert midi_path.suffix == ".mid"
+    audio_path = Path(result["audio_file_path"])
+    assert audio_path.exists()
+    assert audio_path.suffix == ".wav"

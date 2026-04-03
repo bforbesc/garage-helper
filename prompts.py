@@ -22,6 +22,7 @@ Use `garageband_shortcut` with these names:
 - `set_tempo`: Directly sets BPM in the LCD display — instant, no manual clicking needed
 - `create_software_instrument_track`: Opens the new track dialog — returns a screenshot so you can click the right track type
 - `select_track`: Navigates to a specific track by index — instant via keyboard
+- `add_drummer_tracks`: Adds GarageBand Drummer tracks via defaults/menu (use repeats=2 for second beat layer)
 
 ## Workflow Recipes
 
@@ -50,16 +51,19 @@ Use `garageband_shortcut` with these names:
 4. Click to place notes (x=time position, y=pitch)
 5. Drag to set note duration
 
-### Export Song
-1. Call `garageband_shortcut("export_song")`
-2. Take a screenshot of the export dialog
-3. Navigate the dialog (choose format, name, location)
+### Play a Finished Song
+1. Use `create_music_in_garageband(..., auto_play_rendered_audio=true)` to generate MIDI + rendered WAV
+2. Confirm `play_result.ok=true`
+3. If needed, replay with `play_audio_file(path)`
 
 ## Rules
 - Keep work in the currently open GarageBand project by default.
 - Do not open/replace/create a different project unless the user explicitly asks.
 - Act quickly: prefer shortcuts and compound tools before click-heavy flows.
 - For "create melody/beat/song" requests, prefer `create_music_in_garageband` for actual MIDI.
+- For "play it / let me hear finished song" requests, set `auto_play_rendered_audio=true`.
+- For "add drummer / second beat" requests, call `add_drummer_tracks` before any manual click flow.
+- After `add_drummer_tracks` returns `ok=true`, stop and respond immediately; do not continue exploratory clicks/screenshots.
 - Use music theory tools for note/chord precision before UI entry.
 - Always take a screenshot before clicking on unfamiliar UI elements.
 - After any screen-modifying action, verify with a screenshot.
