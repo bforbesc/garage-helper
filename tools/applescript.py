@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from config import settings
 
@@ -27,6 +28,11 @@ def launch_garageband() -> dict:
     return run_applescript(script)
 
 
+def is_garageband_running() -> bool:
+    proc = subprocess.run(["pgrep", "-x", "GarageBand"], capture_output=True, text=True)
+    return proc.returncode == 0
+
+
 def _garageband_window_titles() -> list[str]:
     script = """
 tell application "GarageBand"
@@ -49,6 +55,47 @@ def _has_real_project_window(window_titles: list[str]) -> bool:
     return any(title.lower() != "choose a project" for title in window_titles)
 
 
+def _has_choose_project_window(window_titles: list[str]) -> bool:
+    return any(title.lower() == "choose a project" for title in window_titles)
+
+
+def _dismiss_choose_project_window() -> dict:
+    attempts = []
+    for _ in range(4):
+        titles = _garageband_window_titles()
+        if not _has_choose_project_window(titles):
+            return {"ok": True, "attempts": attempts, "windows": titles}
+
+        # ESC
+        esc_script = """
+tell application "GarageBand" to activate
+delay 0.05
+tell application "System Events"
+  key code 53
+end tell
+"""
+        attempts.append({"action": "escape", "result": run_applescript(esc_script)})
+        time.sleep(0.15)
+
+        titles = _garageband_window_titles()
+        if not _has_choose_project_window(titles):
+            return {"ok": True, "attempts": attempts, "windows": titles}
+
+        # Command+W as fallback close-window action
+        close_script = """
+tell application "GarageBand" to activate
+delay 0.05
+tell application "System Events"
+  keystroke "w" using {command down}
+end tell
+"""
+        attempts.append({"action": "cmd_w", "result": run_applescript(close_script)})
+        time.sleep(0.15)
+
+    final_titles = _garageband_window_titles()
+    return {"ok": not _has_choose_project_window(final_titles), "attempts": attempts, "windows": final_titles}
+
+
 def _wait_for_project_window(timeout_sec: float = 10.0) -> dict:
     deadline = time.monotonic() + max(1.0, timeout_sec)
     last_titles: list[str] = []
@@ -60,6 +107,26 @@ def _wait_for_project_window(timeout_sec: float = 10.0) -> dict:
             return {"ok": True, "windows": titles}
         time.sleep(0.25)
     return {"ok": False, "windows": last_titles}
+
+
+def get_garageband_project_state() -> dict:
+    running = is_garageband_running()
+    if not running:
+        return {
+            "ok": True,
+            "garageband_running": False,
+            "window_titles": [],
+            "has_open_project": False,
+            "has_choose_project_window": False,
+        }
+    window_titles = _garageband_window_titles()
+    return {
+        "ok": True,
+        "garageband_running": True,
+        "window_titles": window_titles,
+        "has_open_project": _has_real_project_window(window_titles),
+        "has_choose_project_window": _has_choose_project_window(window_titles),
+    }
 
 
 def _open_file_via_dialog(file_path: Path) -> dict:
@@ -149,6 +216,10 @@ def open_file_in_garageband(path: str) -> dict:
     if not verify_open.get("ok") and settings.allow_applescript:
         fallback = _open_file_via_dialog(file_path)
         verify_open = _wait_for_project_window(timeout_sec=12.0)
+    dismiss_result = {"ok": True, "skipped": True}
+    if settings.allow_applescript and _has_choose_project_window(verify_open.get("windows", [])):
+        dismiss_result = _dismiss_choose_project_window()
+        verify_open = _wait_for_project_window(timeout_sec=5.0)
     front = get_frontmost_app()
     return {
         "ok": proc.returncode == 0 and bool(verify_open.get("ok")),
@@ -157,6 +228,7 @@ def open_file_in_garageband(path: str) -> dict:
         "focus_result": focus_result,
         "verification": verify_open,
         "fallback_result": fallback,
+        "dismiss_choose_project_result": dismiss_result,
         "frontmost_after": front.get("app", ""),
         "stderr": proc.stderr.strip(),
     }
@@ -192,6 +264,80 @@ def set_new_track_default(track_type: str) -> dict:
     }
 
 
+def _instrument_root() -> Path:
+    return Path("/Applications/GarageBand.app/Contents/Resources/Patches/Instrument")
+
+
+def list_instrument_patches(query: str = "", category: str = "", limit: int = 120) -> dict:
+    root = _instrument_root()
+    if not root.exists():
+        return {"ok": False, "error": f"Instrument patch root not found: {root}"}
+
+    q = (query or "").strip().lower()
+    c = (category or "").strip().lower()
+    results: list[dict[str, Any]] = []
+    for cst in root.rglob("#Root.cst"):
+        patch_dir = cst.parent
+        patch_name = patch_dir.name.replace(".patch", "")
+        cat_name = patch_dir.parent.name
+        if c and c not in cat_name.lower():
+            continue
+        if q and q not in patch_name.lower() and q not in cat_name.lower():
+            continue
+        results.append({"name": patch_name, "category": cat_name, "path": str(cst)})
+
+    results.sort(key=lambda x: (x["category"].lower(), x["name"].lower()))
+    return {
+        "ok": True,
+        "count": len(results),
+        "results": results[: max(1, min(int(limit), 500))],
+    }
+
+
+def apply_instrument_patch(instrument_name: str, category: str = "") -> dict:
+    if not instrument_name.strip():
+        return {"ok": False, "error": "instrument_name cannot be empty"}
+    listing = list_instrument_patches(query=instrument_name, category=category, limit=500)
+    if not listing.get("ok"):
+        return listing
+    matches = listing.get("results", [])
+    if not matches:
+        return {"ok": False, "error": f"No matching instrument patch for '{instrument_name}'", "query": instrument_name, "category": category}
+
+    q = instrument_name.strip().lower()
+    exact = [m for m in matches if m["name"].lower() == q]
+    chosen = exact[0] if exact else matches[0]
+    patch_path = Path(chosen["path"])
+    if not patch_path.exists():
+        return {"ok": False, "error": f"Patch file not found: {patch_path}"}
+
+    focus = ensure_garageband_frontmost(timeout_ms=2500)
+    if not focus.get("ok"):
+        return {"ok": False, "error": "GarageBand focus not confirmed", "focus": focus}
+
+    # Ensure new MIDI tracks don't default to Drummer when user requests a software instrument.
+    _ = set_new_track_default("NTCSoftwareInstrument")
+    proc = subprocess.run(["open", "-a", "GarageBand", str(patch_path)], capture_output=True, text=True)
+    verify = _wait_for_project_window(timeout_sec=6.0)
+    dismiss = {"ok": True, "skipped": True}
+    if _has_choose_project_window(verify.get("windows", [])):
+        dismiss = _dismiss_choose_project_window()
+        verify = _wait_for_project_window(timeout_sec=4.0)
+    front = get_frontmost_app()
+    return {
+        "ok": proc.returncode == 0 and bool(verify.get("ok")),
+        "instrument_name": chosen["name"],
+        "category": chosen["category"],
+        "path": str(patch_path),
+        "returncode": proc.returncode,
+        "stderr": proc.stderr.strip(),
+        "verification": verify,
+        "dismiss_choose_project_result": dismiss,
+        "frontmost_after": front.get("app", ""),
+        "candidates": matches[:8],
+    }
+
+
 def add_new_track_from_menu(repeats: int = 1, delay_sec: float = 0.7) -> dict:
     focus = ensure_garageband_frontmost(timeout_ms=2500)
     if not focus.get("ok"):
@@ -206,6 +352,9 @@ tell application "System Events"
     repeat {repeats} times
       click menu item "New Track…" of menu "Track" of menu bar 1
       delay {max(0.2, float(delay_sec))}
+      -- Confirm current default track type in the new-track dialog
+      key code 36
+      delay 0.25
     end repeat
   end tell
 end tell

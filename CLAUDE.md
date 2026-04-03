@@ -48,6 +48,11 @@ pytest -k test_health_endpoint     # single test by name
 - Music theory tools are structured (not LLM-prompted) to avoid MIDI note hallucination
 - GarageBand has minimal AppleScript support — UI automation via pyautogui is the primary control method
 - The `create_music_in_garageband` tool composes (MIDI + WAV), can open MIDI in GarageBand, and can optionally auto-play rendered audio
+- `create_music_in_garageband` project targeting is controlled by `project_mode`:
+  - `auto` (default): keep current project if one is open, otherwise open new
+  - `current`: operate only when a project is already open
+  - `new`: explicitly open a new project
+  - `ask`: request user confirmation when a project is already open
 - Screenshots and downloads go to `screenshots/` and `downloads/` dirs respectively
 - Flask app disables caching and uses file mtime for asset versioning
 

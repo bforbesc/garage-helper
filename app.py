@@ -123,7 +123,15 @@ def api_workflow_create_jungle():
     bars = int(payload.get("bars", 8))
     bpm = int(payload.get("bpm", 120))
     key = payload.get("key", "C")
-    replace_current_project = bool(payload.get("replace_current_project", True))
+    project_mode = str(payload.get("project_mode", "")).strip().lower()
+    replace_current_project = payload.get("replace_current_project")
+    if not project_mode:
+        if replace_current_project is True:
+            project_mode = "new"
+        elif replace_current_project is False:
+            project_mode = "auto"
+        else:
+            project_mode = "auto"
     auto_play = bool(payload.get("auto_play_rendered_audio", False))
     try:
         result = agent._tool_create_music_in_garageband(
@@ -136,7 +144,7 @@ def api_workflow_create_jungle():
                 "include_tracks": ["melody", "bass", "drums"],
                 "style_hint": "busy",
                 "open_in_garageband": True,
-                "replace_current_project": replace_current_project,
+                "project_mode": project_mode,
                 "auto_play_rendered_audio": auto_play,
             }
         )

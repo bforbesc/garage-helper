@@ -122,6 +122,23 @@ def _clamp_midi(note: int, low: int = 36, high: int = 96) -> int:
     return max(low, min(high, note))
 
 
+def _expand_scale_pool(scale_midi: list[int], low: int, high: int) -> list[int]:
+    """Expand a single-octave scale into a multi-octave sorted pool within [low, high]."""
+    pool: set[int] = set()
+    for base in scale_midi:
+        for shift in (-24, -12, 0, 12, 24):
+            candidate = int(base) + shift
+            if low <= candidate <= high:
+                pool.add(candidate)
+    return sorted(pool)
+
+
+def _snap_to_scale(note: int, scale_pool: list[int]) -> int:
+    if not scale_pool:
+        return int(note)
+    return min(scale_pool, key=lambda n: (abs(n - int(note)), n))
+
+
 def _degree_to_chord(key: str, scale_type: str, degree: str, octave: int = 4) -> dict[str, Any]:
     key_semitone = _note_to_semitone(key)
     degree_clean = degree.strip().upper()
@@ -171,6 +188,7 @@ def _melody_from_scale(
     progression: list[dict[str, Any]],
     genre: str,
     style_hint: str | None = None,
+    allow_out_of_key_notes: bool = False,
 ) -> list[dict[str, Any]]:
     notes: list[dict[str, Any]] = []
     style_text = (style_hint or "").strip().lower()
@@ -183,8 +201,15 @@ def _melody_from_scale(
     for bar_idx in range(bars):
         bar_start = bar_idx * 4.0
         chord = progression[bar_idx % len(progression)]["midi_notes"]
-        chord_tones = [_clamp_midi(n + 12, low=48, high=84) for n in chord]
-        scale_pool = sorted({_clamp_midi(n, low=48, high=84) for n in scale_midi + [n + 12 for n in scale_midi]})
+        scale_pool = _expand_scale_pool(scale_midi, low=50, high=82)
+        chord_tones = []
+        for n in chord:
+            for shift in (0, 12, 24):
+                candidate = n + shift
+                if 50 <= candidate <= 82:
+                    chord_tones.append(_snap_to_scale(candidate, scale_pool))
+        if not chord_tones:
+            chord_tones = scale_pool[:]
         pattern = random.choice(patterns)
         beat = bar_start
         for dur in pattern:
@@ -198,6 +223,12 @@ def _melody_from_scale(
                 midi_note = random.choice(chord_tones)
             else:
                 midi_note = random.choice(scale_pool)
+            if allow_out_of_key_notes and random.random() < 0.26:
+                # Optional chromatic color when user explicitly asks for out-of-key notes.
+                shift = random.choice([-2, -1, 1, 2])
+                candidate = _clamp_midi(midi_note + shift, low=50, high=82)
+                if candidate not in scale_pool:
+                    midi_note = candidate
             # Keep lead line clearly dominant in GarageBand by using higher note velocities.
             velocity = random.randint(108, 124)
             notes.append(
@@ -452,6 +483,7 @@ def compose_music_idea(
     seed: int | None = None,
     include_tracks: list[str] | None = None,
     style_hint: str | None = None,
+    allow_out_of_key_notes: bool = False,
 ) -> dict[str, Any]:
     if seed is not None:
         random.seed(int(seed))
@@ -471,6 +503,7 @@ def compose_music_idea(
         progression=progression,
         genre=normalized_genre,
         style_hint=style_hint,
+        allow_out_of_key_notes=allow_out_of_key_notes,
     )
     bass_notes = _bass_from_chords(progression)
     drum_notes = _drums_pattern(resolved_bars, genre=normalized_genre, style_hint=style_hint)
@@ -502,6 +535,7 @@ def compose_music_idea(
         "bpm": resolved_bpm,
         "bars": resolved_bars,
         "style_hint": (style_hint or "").strip(),
+        "allow_out_of_key_notes": bool(allow_out_of_key_notes),
         "included_tracks": list(tracks.keys()),
         "progression": progression,
         "tracks": tracks,

@@ -10,6 +10,11 @@ Python + Flask assistant for music production in GarageBand on macOS.
 - Composition generation for melody, bass, drums, chords (`tools/composer.py`)
 - Exports both MIDI and rendered WAV for each composition
 - Optional auto-play of the rendered finished song
+- Project-safe compose behavior via `project_mode`:
+  - `auto` (default): keep current open project; only open a new one if none is open
+  - `current`: require an already open project
+  - `new`: force opening a new project from generated MIDI
+  - `ask`: return a confirmation-needed result when a project is already open
 - Freesound search/download tools (`tools/samples.py`)
 - Voice input in browser UI (Web Speech API)
 

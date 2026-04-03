@@ -20,14 +20,15 @@ class GarageBandAgent:
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
         # Keep only plain text turns in memory; tool chatter remains per-request to avoid malformed histories.
         self.text_history: list[dict[str, str]] = []
-        # Safety default: assume user is already working in a project; avoid silent project replacement.
-        self.project_initialized = True
+        # Fallback memory of whether a real project window exists.
+        self.project_initialized = False
 
         self.tool_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "computer_action": self._tool_computer_action,
             "garageband_shortcut": self._tool_garageband_shortcut,
             "get_frontmost_app": lambda i: applescript.get_frontmost_app(),
             "ensure_garageband_focus": lambda i: applescript.ensure_garageband_frontmost(i.get("timeout_ms", 1500)),
+            "get_garageband_project_state": lambda i: self._tool_get_garageband_project_state(),
             "new_garageband_project": self._tool_new_garageband_project,
             "run_applescript": lambda i: applescript.run_applescript(i["script"]),
             "launch_garageband": lambda i: applescript.launch_garageband(),
@@ -50,6 +51,7 @@ class GarageBandAgent:
                 seed=i.get("seed"),
                 include_tracks=i.get("include_tracks"),
                 style_hint=i.get("style_hint"),
+                allow_out_of_key_notes=i.get("allow_out_of_key_notes", False),
             ),
             "create_music_in_garageband": self._tool_create_music_in_garageband,
             "search_freesound": lambda i: samples.search_freesound(i["query"], i.get("page_size", 12)),
@@ -60,6 +62,12 @@ class GarageBandAgent:
             "create_software_instrument_track": self._tool_create_software_instrument_track,
             "select_track": self._tool_select_track,
             "add_drummer_tracks": lambda i: applescript.add_drummer_tracks(i.get("repeats", 2)),
+            "list_instrument_patches": lambda i: applescript.list_instrument_patches(
+                query=i.get("query", ""), category=i.get("category", ""), limit=i.get("limit", 120)
+            ),
+            "apply_instrument_patch": lambda i: applescript.apply_instrument_patch(
+                instrument_name=i["instrument_name"], category=i.get("category", "")
+            ),
         }
 
         self.tools = [
@@ -106,6 +114,11 @@ class GarageBandAgent:
                 "description": "Open GarageBand new project dialog. Use only when user explicitly asks for a new project.",
                 "input_schema": {"type": "object", "properties": {}},
             },
+            {
+                "name": "get_garageband_project_state",
+                "description": "Return whether GarageBand currently has a real open project window.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
             {"name": "run_applescript", "description": "Run AppleScript snippet.", "input_schema": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}},
             {"name": "launch_garageband", "description": "Launch and activate GarageBand app.", "input_schema": {"type": "object", "properties": {}}},
             {"name": "open_file_in_garageband", "description": "Open local file (for example MIDI) in GarageBand.", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
@@ -141,27 +154,9 @@ class GarageBandAgent:
             },
             {
                 "name": "compose_music_idea",
-                "description": "Create melody/chords/bass/drums and export MIDI + rendered WAV. Returns file paths and note events.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "genre": {"type": "string"},
-                        "key": {"type": "string"},
-                        "scale_type": {"type": "string"},
-                        "bars": {"type": "integer"},
-                        "bpm": {"type": "integer"},
-                        "seed": {"type": "integer"},
-                        "include_tracks": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['melody','bass','drums','chords']"},
-                        "style_hint": {"type": "string", "description": "e.g. 'legato', 'sparse', 'busy', 'swing'"},
-                    },
-                },
-            },
-            {
-                "name": "create_music_in_garageband",
                 "description": (
-                    "Fast path: compose melody/bass/drums/chords, export MIDI+WAV, optionally open MIDI in GarageBand, "
-                    "and optionally play the rendered WAV. Set replace_current_project=true only when user explicitly asks "
-                    "for a new/open project."
+                    "Create melody/chords/bass/drums and export MIDI + rendered WAV. "
+                    "Melody is in-key by default unless allow_out_of_key_notes=true."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -174,8 +169,43 @@ class GarageBandAgent:
                         "seed": {"type": "integer"},
                         "include_tracks": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['melody','bass','drums','chords']"},
                         "style_hint": {"type": "string", "description": "e.g. 'legato', 'sparse', 'busy', 'swing'"},
+                        "allow_out_of_key_notes": {"type": "boolean", "description": "Default false. Set true only when user explicitly asks for chromatic/out-of-key notes."},
+                    },
+                },
+            },
+            {
+                "name": "create_music_in_garageband",
+                "description": (
+                    "Fast path: compose melody/bass/drums/chords, export MIDI+WAV, optionally open MIDI in GarageBand, "
+                    "and optionally play the rendered WAV. Use project_mode='auto' (default) to keep working on the "
+                    "current project when one is already open."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "genre": {"type": "string"},
+                        "key": {"type": "string"},
+                        "scale_type": {"type": "string"},
+                        "bars": {"type": "integer"},
+                        "bpm": {"type": "integer"},
+                        "seed": {"type": "integer"},
+                        "include_tracks": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['melody','bass','drums','chords']"},
+                        "style_hint": {"type": "string", "description": "e.g. 'legato', 'sparse', 'busy', 'swing'"},
+                        "allow_out_of_key_notes": {"type": "boolean", "description": "Default false. Set true only when user explicitly asks for chromatic/out-of-key notes."},
                         "open_in_garageband": {"type": "boolean"},
-                        "replace_current_project": {"type": "boolean"},
+                        "project_mode": {
+                            "type": "string",
+                            "enum": ["auto", "current", "new", "ask"],
+                            "description": (
+                                "auto: keep current project if open else open new from MIDI; "
+                                "current: require existing project; new: always open a new project; "
+                                "ask: if project exists, return a prompt to confirm."
+                            ),
+                        },
+                        "replace_current_project": {
+                            "type": "boolean",
+                            "description": "Deprecated legacy flag. true maps to project_mode='new'; false maps to project_mode='auto'.",
+                        },
                         "auto_play_rendered_audio": {"type": "boolean"},
                     },
                 },
@@ -222,6 +252,33 @@ class GarageBandAgent:
                     "properties": {
                         "repeats": {"type": "integer", "description": "How many Drummer tracks to add (default 2)"},
                     },
+                },
+            },
+            {
+                "name": "list_instrument_patches",
+                "description": "List available GarageBand software instrument patches by query/category.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search text, e.g. synth, piano, organ"},
+                        "category": {"type": "string", "description": "Optional category, e.g. Keyboards, Piano"},
+                        "limit": {"type": "integer", "description": "Max results (default 120)"},
+                    },
+                },
+            },
+            {
+                "name": "apply_instrument_patch",
+                "description": (
+                    "Apply a GarageBand software instrument patch by name (and optional category) "
+                    "to the current session/project context."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "instrument_name": {"type": "string", "description": "Patch name, e.g. Harmonic Scream Synth"},
+                        "category": {"type": "string", "description": "Optional category, e.g. Keyboards, Vintage Electric Piano"},
+                    },
+                    "required": ["instrument_name"],
                 },
             },
         ]
@@ -442,6 +499,21 @@ class GarageBandAgent:
             self.project_initialized = True
         return result
 
+    def _tool_get_garageband_project_state(self) -> dict[str, Any]:
+        if settings.allow_applescript:
+            state = applescript.get_garageband_project_state()
+            if state.get("ok"):
+                self.project_initialized = bool(state.get("has_open_project"))
+            return state
+        return {
+            "ok": True,
+            "garageband_running": bool(self.project_initialized),
+            "window_titles": [],
+            "has_open_project": bool(self.project_initialized),
+            "has_choose_project_window": False,
+            "state_source": "memory_fallback",
+        }
+
     def _tool_open_file_in_garageband(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         result = applescript.open_file_in_garageband(tool_input["path"])
         if result.get("ok"):
@@ -520,25 +592,71 @@ class GarageBandAgent:
             seed=tool_input.get("seed"),
             include_tracks=tool_input.get("include_tracks"),
             style_hint=tool_input.get("style_hint"),
+            allow_out_of_key_notes=tool_input.get("allow_out_of_key_notes", False),
         )
         if not composition.get("ok"):
             return composition
         open_requested = bool(tool_input.get("open_in_garageband", True))
-        replace_current = bool(tool_input.get("replace_current_project", False))
         auto_play = bool(tool_input.get("auto_play_rendered_audio", False))
-        if open_requested and self.project_initialized and not replace_current:
+        project_state = self._tool_get_garageband_project_state()
+        has_open_project = bool(project_state.get("has_open_project"))
+        requested_mode = str(tool_input.get("project_mode", "")).strip().lower()
+        replace_current_raw = tool_input.get("replace_current_project")
+        if not requested_mode:
+            if replace_current_raw is True:
+                requested_mode = "new"
+            elif replace_current_raw is False:
+                requested_mode = "auto"
+            else:
+                requested_mode = "auto"
+        if requested_mode not in {"auto", "current", "new", "ask"}:
             return {
                 "ok": False,
-                "error": (
-                    "Refusing to replace current project without explicit permission. "
-                    "Set replace_current_project=true only when the user explicitly asks for a new/open project."
-                ),
+                "error": f"Invalid project_mode '{requested_mode}'. Use one of: auto, current, new, ask.",
                 "composition": composition,
-                "opened_in_garageband": False,
+                "project_state": project_state,
             }
+        if requested_mode == "ask" and open_requested and has_open_project:
+            return {
+                "ok": False,
+                "needs_project_choice": True,
+                "error": "A GarageBand project is already open. Choose project_mode='current' to keep it or 'new' to open a new project.",
+                "composition": composition,
+                "project_state": project_state,
+                "project_mode": requested_mode,
+            }
+
+        if requested_mode == "auto":
+            resolved_mode = "current" if has_open_project else "new"
+        elif requested_mode == "ask":
+            resolved_mode = "new"
+        else:
+            resolved_mode = requested_mode
+
+        if open_requested and resolved_mode == "current" and not has_open_project:
+            return {
+                "ok": False,
+                "error": "project_mode='current' requires an open GarageBand project. Use project_mode='new' or 'auto'.",
+                "composition": composition,
+                "project_state": project_state,
+                "project_mode": requested_mode,
+                "resolved_project_mode": resolved_mode,
+            }
+
         launch_result = applescript.launch_garageband() if open_requested else {"ok": True, "skipped": True}
-        open_result = applescript.open_file_in_garageband(composition["midi_file_path"]) if open_requested else {"ok": True, "skipped": True}
-        opened = bool(open_requested and launch_result.get("ok") and open_result.get("ok"))
+        if not open_requested:
+            open_result = {"ok": True, "skipped": True}
+        elif resolved_mode == "new":
+            open_result = applescript.open_file_in_garageband(composition["midi_file_path"])
+        else:
+            open_result = {
+                "ok": True,
+                "skipped": True,
+                "mode": "current",
+                "reason": "Kept current open project; skipped opening MIDI as a new project.",
+                "midi_file_path": composition.get("midi_file_path", ""),
+            }
+        opened = bool(open_requested and resolved_mode == "new" and launch_result.get("ok") and open_result.get("ok"))
         if auto_play:
             audio_path = composition.get("audio_file_path", "")
             play_result = audio.play_audio_file(audio_path) if audio_path else {"ok": False, "error": "No rendered audio file was produced."}
@@ -553,6 +671,9 @@ class GarageBandAgent:
             and bool(open_result.get("ok"))
             and (bool(play_result.get("ok")) or not auto_play),
             "composition": composition,
+            "project_state": project_state,
+            "project_mode": requested_mode,
+            "resolved_project_mode": resolved_mode,
             "launch_result": launch_result,
             "open_result": open_result,
             "opened_in_garageband": opened,
